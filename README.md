@@ -95,3 +95,92 @@ smoke done in ms: 351.06
 Files:
 - [Effecient-Tokenizer/scripts/smoke_test.py](Effecient-Tokenizer/scripts/smoke_test.py)
 - [Effecient-Tokenizer/app/main.py](Effecient-Tokenizer/app/main.py)
+
+## Sample Output
+
+### Compose
+
+```json
+{
+	"model": "gpt-4o",
+	"optimized_prompt": "Respond with concise bullet points. Keep it under 6!\n\nExplain transformers in ML",
+	"normalized_prompt": "Explain transformers in ML",
+	"instruction": "Respond with concise bullet points. Keep it under 6!",
+	"input_tokens": 17,
+	"estimated_cost_usd": 0.085,
+	"overhead_ms": 120.5,
+	"original_input_tokens": 17,
+	"optimized_input_tokens": 17,
+	"token_savings": 0,
+	"token_savings_pct": 0.0,
+	"estimated_cost_usd_baseline": 0.085
+}
+```
+
+### Chat
+
+## Architecture
+
+```
+User Request
+	│
+	├─> Normalize Text (preserve newlines, collapse intra-line whitespace, dedupe)
+	│
+	├─> Output Instructions (short | bullets | code)
+	│
+	├─> Cache GET (TTL, hashed key per endpoint)
+	│      └─ hit → return payload, log analytics
+	│
+	├─> Compose Path (optimized prompt + savings)
+	│      ├─ Build optimized_prompt = instruction + normalized
+	│      ├─ Compute tokens + cost + savings
+	│      ├─ Cache SET (store enriched payload)
+	│      └─ Log Analytics (overhead, savings, cache_hit=false)
+	│
+	└─> Chat Path (rolling summary + token budget)
+			 ├─ Append user → prior messages exclude latest
+			 ├─ Build context: summary + recent N
+			 ├─ If over budget: summarize older → keep recent → recompute
+			 ├─ If still over: shrink recent window stepwise
+			 ├─ Cache GET (summary + recent + instruction + latest)
+			 │      └─ hit → return payload, log analytics
+			 ├─ Build optimized_prompt (context + user)
+			 ├─ Cache SET (compact payload)
+			 └─ Log Analytics (overhead, tokens, cache_hit=false)
+
+Observability
+	├─ /cache/stats, /cache/sweep, /cache/clear
+	└─ /analytics/recent (events + aggregates)
+```
+
+```json
+{
+	"session_id": "demo",
+	"model": "gpt-4o",
+	"instruction": "Respond in short sentences. Be concise!",
+	"optimized_prompt": "Respond in short sentences. Be concise!\n\nSummary: Key points: rlhf, reward, human, model, policy\nRecent:\nUser: What is RLHF?\nAssistant:",
+	"context_tokens": 64,
+	"input_tokens": 81,
+	"estimated_cost_usd": 0.405,
+	"summary": "Key points: rlhf, reward, human, model, policy",
+	"recent_message_count": 1,
+	"overhead_ms": 98.7
+}
+```
+
+### Analytics
+
+```json
+{
+	"events": [
+		{"endpoint": "compose", "cache_hit": false, "overhead_ms": 120.5, "token_savings": 0},
+		{"endpoint": "chat", "cache_hit": false, "overhead_ms": 98.7, "input_tokens": 81}
+	],
+	"stats": {
+		"events_total": 2,
+		"cache_hit_rate": 0.0,
+		"avg_overhead_ms": 109.6,
+		"avg_token_savings": 0.0
+	}
+}
+```
