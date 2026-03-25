@@ -1,4 +1,16 @@
+# Core
 fastapi==0.115.0
-uvicorn==0.30.0
+uvicorn[standard]==0.30.0
 pydantic==2.7.4
+
+# Tokenisation
 tiktoken==0.7.0
+
+# HTTP client for LLM dispatcher (optional but recommended)
+httpx==0.27.0
+
+# Redis backing store (optional — only needed when STORE_BACKEND=redis)
+redis==5.0.4
+
+# Semantic embeddings (optional — graceful fallback to TF-IDF if absent)
+# sentence-transformers==3.0.1

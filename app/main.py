@@ -1,34 +1,107 @@
-from fastapi import FastAPI
-from pydantic import BaseModel
-from collections import Counter, deque
-from .normalize import normalize_text
-from . import cache 
-from typing import Dict, Any
+"""
+Efficient Tokenizer Middleware — Main Application
+==================================================
+Exposes two interface groups:
+
+  PROXY INTERFACE  (OpenAI-compatible, zero code changes required)
+  ──────────────────────────────────────────────────────────────────
+  POST /v1/chat/completions   — drop-in replacement for OpenAI endpoint
+                                runs full pipeline + dispatcher + observability
+
+  LEGACY ENDPOINTS  (preserved for backwards compatibility)
+  ──────────────────────────────────────────────────────────────────
+  POST /compose               — single-turn optimised prompt builder
+  POST /chat                  — multi-turn session manager
+  POST /chat/reset            — clear a session
+  GET  /cache/stats           — legacy cache stats
+  POST /cache/sweep           — evict expired entries
+  POST /cache/clear           — clear everything
+  GET  /analytics/recent      — recent telemetry events
+
+  ADMIN API
+  ──────────────────────────────────────────────────────────────────
+  GET  /admin/metrics         — aggregate usage dashboard data
+  GET  /admin/attribution     — per-request attribution log
+  GET  /admin/confidence-log  — auditable lossy-drop log
+  GET  /admin/sessions        — active session list
+  DELETE /admin/sessions/{id} — delete a session + its graph
+  GET  /admin/store/stats     — backing store health
+  GET  /health                — liveness check
+"""
+from __future__ import annotations
+
+import os
 import time
-import re
-import statistics
+import uuid
+from collections import Counter, deque
+from typing import Any, Dict, List, Optional
 
-SESSIONS: Dict[str, Dict[str, Any]] = {} # {session_id: {"summary": str, "messages": [{"role": "user|assistant", "content": str}]}}
-ANALYTICS_EVENTS = deque(maxlen=250)  # recent events buffer
-REQUEST_COUNT = 0  # simple counter for periodic cache sweep
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
-# Pricing table (USD per 1K tokens)
-COST_PER_1K = {
-    "gpt-4o": {"input": 5.0, "output": 15.0},
-    "haiku": {"input": 0.5, "output": 1.5},
-    "gpt-5": {"input": 6.0, "output": 18.0},  # placeholder
+# Internal modules
+from .normalize import normalize_text
+from . import cache                         # legacy in-process cache
+from .tokenizer import count_tokens, count_tokens_messages
+from .ingress import split_messages, verify_auth, detect_model
+from .pipeline import run as run_pipeline, PipelineConfig
+from .cache_router import route as cache_route, store_turn, invalidate_session
+from .dispatcher import dispatch
+from . import observability as obs
+from .entity_graph import get_graph, delete_graph, all_session_ids
+from .store import store
+
+
+# ---------------------------------------------------------------------------
+# App
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="Efficient Tokenizer Middleware",
+    description="Drop-in OpenAI-compatible proxy with multi-stage token compression.",
+    version="2.0.0",
+)
+
+
+# ---------------------------------------------------------------------------
+# Startup warmup
+# ---------------------------------------------------------------------------
+
+@app.on_event("startup")
+def _prewarm() -> None:
+    try:
+        count_tokens("Warmup text", "gpt-4o")
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Helpers (cost table kept for legacy endpoints)
+# ---------------------------------------------------------------------------
+
+COST_PER_1K: Dict[str, Dict[str, float]] = {
+    "gpt-4o":  {"input": 5.0,  "output": 15.0},
+    "gpt-4":   {"input": 30.0, "output": 60.0},
+    "gpt-3.5": {"input": 0.5,  "output": 1.5},
+    "gpt-5":   {"input": 6.0,  "output": 18.0},
+    "claude":  {"input": 3.0,  "output": 15.0},
 }
 
 
-def count_tokens_tiktoken(text: str, encoding_name: str = "cl100k_base") -> int:
-    try:
-        import tiktoken
-        enc = tiktoken.get_encoding(encoding_name)
-        return len(enc.encode(text))
-    except Exception:
-        return len(text.split())
+def _estimate_cost(model: str, in_tok: int, out_tok: int) -> float:
+    m = model.lower()
+    pricing = None
+    for key in COST_PER_1K:
+        if key in m:
+            pricing = COST_PER_1K[key]
+            break
+    if not pricing:
+        pricing = COST_PER_1K["gpt-4o"]
+    return (in_tok / 1000) * pricing["input"] + (out_tok / 1000) * pricing["output"]
 
-def output_instructions(mode: str | None) -> str | None:
+
+def _output_instructions(mode: Optional[str]) -> Optional[str]:
     if not mode:
         return None
     m = mode.lower()
@@ -40,23 +113,269 @@ def output_instructions(mode: str | None) -> str | None:
         return "Return code only in a single block, no prose."
     return "Be Concise!"
 
-    
 
-def estimate_cost(model: str, in_tokens: int, out_tokens: int) -> float:
-    pricing = COST_PER_1K.get(model, COST_PER_1K["gpt-4o"])
-    return (in_tokens / 1000) * pricing["input"] + (out_tokens / 1000) * pricing["output"]
+# Legacy session store (used by /chat and /compose endpoints)
+SESSIONS: Dict[str, Dict[str, Any]] = {}
 
-def log_event(event: Dict[str, Any]) -> None:
-    # Minimal validation and append to buffer
-    try:
-        event["ts"] = event.get("ts", time.time())
-        ANALYTICS_EVENTS.append(event)
-    except Exception:
-        # Avoid raising from analytics
-        pass
 
-def summarize_messages(messages: list[dict], max_len: int = 500) -> str:
-    # Simple keyword based summary that doesnt call model
+# ===========================================================================
+# ── PROXY ENDPOINT  POST /v1/chat/completions ──────────────────────────────
+# ===========================================================================
+
+class ChatCompletionsRequest(BaseModel):
+    model: str = "gpt-4o"
+    messages: List[Dict[str, Any]]
+    # Pipeline tuning (optional, ignored by upstream LLM)
+    compression_mode: str = "lossy"           # "lossless" | "lossy"
+    max_history_tokens: int = 4_000
+    relevance_threshold: float = 0.15
+    dedup_threshold: float = 0.92
+    # Session for entity graph continuity
+    session_id: Optional[str] = None
+    # Anything else forwarded to the LLM
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = None
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    req: ChatCompletionsRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    verify_auth(authorization, x_api_key)
+    t0 = time.perf_counter()
+    request_id = f"req_{uuid.uuid4().hex[:12]}"
+
+    # ── 1. Ingress: split payload ──────────────────────────────────────────
+    split = split_messages(req.messages, req.model)
+    session_id = req.session_id or f"anon_{uuid.uuid4().hex[:8]}"
+    graph = get_graph(session_id)
+
+    # Register all history turns in the entity graph
+    for msg in split.history:
+        graph.add_turn(msg["role"], msg["content"])
+    if split.user_message:
+        graph.add_turn("user", split.user_message)
+
+    # ── 2. Compression pipeline ────────────────────────────────────────────
+    cfg = PipelineConfig(
+        mode=req.compression_mode,
+        dedup_threshold=req.dedup_threshold,
+        relevance_threshold=req.relevance_threshold,
+        max_history_tokens=req.max_history_tokens,
+    )
+    result = run_pipeline(
+        system_prompt=split.system_prompt,
+        history=split.history,
+        user_message=split.user_message,
+        model=req.model,
+        config=cfg,
+        graph=graph,
+    )
+
+    # ── 3. Cache router ────────────────────────────────────────────────────
+    cache_result = cache_route(
+        system_prompt=result.system_prompt,
+        history=result.history,
+        user_message=split.user_message,
+        model=req.model,
+        summary=result.summary,
+    )
+
+    if cache_result.full_cache_hit and cache_result.cached_response:
+        overhead_ms = (time.perf_counter() - t0) * 1000
+        obs.record(
+            request_id=request_id,
+            endpoint="/v1/chat/completions",
+            model=req.model,
+            raw_tokens=result.raw_tokens,
+            post_tokens=result.post_tokens,
+            savings_by_stage=result.savings_by_stage,
+            compression_mode=result.compression_mode,
+            confidence_score=result.confidence_score,
+            overhead_ms=overhead_ms,
+            session_id=session_id,
+            extra={"cache_hit": True},
+        )
+        return cache_result.cached_response
+
+    # ── 4. LLM dispatcher ─────────────────────────────────────────────────
+    extra_params: Dict[str, Any] = {}
+    if req.temperature is not None:
+        extra_params["temperature"] = req.temperature
+    if req.max_tokens is not None:
+        extra_params["max_tokens"] = req.max_tokens
+
+    llm_response = dispatch(
+        system_prompt=result.system_prompt,
+        history=result.history,
+        user_message=split.user_message,
+        model=req.model,
+        static_cache_hit=cache_result.static_cache_hit,
+        summary=result.summary,
+        extra_params=extra_params,
+    )
+
+    # Register assistant reply in entity graph
+    if llm_response.get("content"):
+        graph.add_turn("assistant", llm_response["content"])
+
+    # ── 5. Observability ──────────────────────────────────────────────────
+    overhead_ms = (time.perf_counter() - t0) * 1000
+    usage = llm_response.get("usage", {})
+    post_tokens_actual = usage.get("prompt_tokens", result.post_tokens)
+
+    telemetry = obs.record(
+        request_id=request_id,
+        endpoint="/v1/chat/completions",
+        model=req.model,
+        raw_tokens=result.raw_tokens,
+        post_tokens=post_tokens_actual,
+        savings_by_stage=result.savings_by_stage,
+        compression_mode=result.compression_mode,
+        confidence_score=result.confidence_score,
+        overhead_ms=overhead_ms,
+        session_id=session_id,
+        extra={
+            "cache_hit":    cache_result.full_cache_hit,
+            "fallback_used": llm_response.get("fallback_used", False),
+        },
+    )
+
+    # Build OpenAI-compatible response envelope
+    response_payload: Dict[str, Any] = {
+        "id":      llm_response.get("id", request_id),
+        "object":  "chat.completion",
+        "model":   llm_response.get("model", req.model),
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": llm_response.get("content", "")},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": usage,
+        # Middleware-specific metadata (non-standard fields)
+        "_middleware": {
+            "request_id":      request_id,
+            "raw_tokens":      result.raw_tokens,
+            "post_tokens":     post_tokens_actual,
+            "token_savings":   telemetry["token_savings"],
+            "pct_saved":       telemetry["pct_saved"],
+            "cost_usd_saved":  telemetry["cost_usd_saved"],
+            "savings_by_stage": result.savings_by_stage,
+            "compression_mode": result.compression_mode,
+            "confidence_score": result.confidence_score,
+            "overhead_ms":     round(overhead_ms, 3),
+            "cache_hit":       cache_result.full_cache_hit,
+            "static_prefix_cached": cache_result.static_cache_hit,
+            "entity_snapshot": result.entity_snapshot,
+        },
+    }
+
+    # Store for future cache hits
+    store_turn(cache_result.full_cache_key, response_payload, ttl_s=300)
+
+    return response_payload
+
+
+# ===========================================================================
+# ── ADMIN API ───────────────────────────────────────────────────────────────
+# ===========================================================================
+
+@app.get("/admin/metrics")
+def admin_metrics(limit: int = 1_000) -> Dict[str, Any]:
+    return obs.aggregate_stats(limit=limit)
+
+
+@app.get("/admin/attribution")
+def admin_attribution(limit: int = 50) -> Dict[str, Any]:
+    return {"attribution": obs.recent_attribution(limit=limit)}
+
+
+@app.get("/admin/confidence-log")
+def admin_confidence_log(limit: int = 50) -> Dict[str, Any]:
+    return {"confidence_log": obs.recent_confidence_log(limit=limit)}
+
+
+@app.get("/admin/events")
+def admin_events(limit: int = 50) -> Dict[str, Any]:
+    return {"events": obs.recent_events(limit=limit)}
+
+
+@app.get("/admin/sessions")
+def admin_sessions() -> Dict[str, Any]:
+    ids = all_session_ids()
+    return {"sessions": ids, "count": len(ids)}
+
+
+@app.delete("/admin/sessions/{session_id}")
+def admin_delete_session(session_id: str) -> Dict[str, Any]:
+    delete_graph(session_id)
+    invalidate_session(session_id)
+    SESSIONS.pop(session_id, None)
+    return {"deleted": session_id}
+
+
+@app.get("/admin/store/stats")
+def admin_store_stats() -> Dict[str, Any]:
+    return {
+        "backend": type(store).__name__,
+        "alive":   store.ping(),
+        "size":    store.size(),
+    }
+
+
+# ===========================================================================
+# ── HEALTH ──────────────────────────────────────────────────────────────────
+# ===========================================================================
+
+@app.get("/health")
+def health() -> Dict[str, Any]:
+    return {
+        "status": "ok",
+        "store":  store.ping(),
+        "version": "2.0.0",
+    }
+
+
+# ===========================================================================
+# ── LEGACY ENDPOINTS (preserved) ────────────────────────────────────────────
+# ===========================================================================
+
+class ProfileRequest(BaseModel):
+    normalize: bool = False
+    model: str = "gpt-4o"
+    prompt: str
+    response: str = ""
+    output_mode: Optional[str] = None
+
+
+class ChatRequest(BaseModel):
+    session_id: str
+    user_message: str
+    model: str = "gpt-4o"
+    output_mode: Optional[str] = "short"
+    max_context_tokens: int = 800
+    recent_messages: int = 4
+
+
+class ComposeRequest(BaseModel):
+    prompt: str
+    model: str = "gpt-4o"
+    output_mode: Optional[str] = "short"
+
+
+class ResetRequest(BaseModel):
+    session_id: str
+
+
+# ---------- legacy helpers ----------
+
+def _summarize_messages(messages: list[dict], max_len: int = 500) -> str:
+    import re
     text = " ".join(m["content"] for m in messages if m.get("content"))
     words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
     stop = {
@@ -68,10 +387,10 @@ def summarize_messages(messages: list[dict], max_len: int = 500) -> str:
     top = [w for w, _ in freq.most_common(12)]
     if not top:
         return text[:max_len]
-    summary = f"Key points: {', '.join(top)}"
-    return summary[:max_len]
-    
-def format_context(summary: str, messages: list[dict], recent_n: int) -> str:
+    return f"Key points: {', '.join(top)}"[:max_len]
+
+
+def _format_context(summary: str, messages: list[dict], recent_n: int) -> str:
     recent = messages[-recent_n:] if recent_n > 0 else []
     parts = []
     if summary:
@@ -82,257 +401,155 @@ def format_context(summary: str, messages: list[dict], recent_n: int) -> str:
             role = m.get("role", "user").capitalize()
             parts.append(f"{role}: {m.get('content', '')}")
     return "\n".join(parts) if parts else ""
-    
-    
-
-class ProfileRequest(BaseModel):
-    normalize: bool = False
-    model: str = "gpt-4o"
-    prompt: str
-    response: str = ""
-    output_mode: str | None = None 
-
-class ChatRequest(BaseModel):
-    session_id: str
-    user_message: str
-    model: str = "gpt-4o"
-    output_mode: str | None = "short"  # default concise answer
-    max_context_tokens: int = 800  # budget for the context for the llm
-    recent_messages: int = 4  # keep last N turns verbatim
-
-class ComposeRequest(BaseModel):
-    prompt: str
-    model: str = "gpt-4o"
-    output_mode: str | None = "short" #default which is short answers
-
-class ResetRequest(BaseModel):
-    session_id: str
 
 
-app = FastAPI()
+# ---------- legacy cache helpers ----------
 
-@app.get("/cache/stats")
-def cache_stats():
-    return cache.stats()
+_REQUEST_COUNT = 0
 
-@app.post("/cache/sweep")
-def cache_sweep():
-    removed = cache.sweep()
-    return {"removed": removed, **cache.stats()}
+def _maybe_sweep() -> None:
+    global _REQUEST_COUNT
+    _REQUEST_COUNT += 1
+    if _REQUEST_COUNT % 200 == 0:
+        cache.sweep()
 
-@app.post("/cache/clear")
-def cache_clear():
-    cache.clear()
-    return {"cleared": True, **cache.stats()}
 
-@app.on_event("startup")
-def _prewarm() -> None:
-    # Prime tokenizer and regex to reduce first-call latency
-    try:
-        _ = count_tokens_tiktoken("Warmup text", "cl100k_base")
-    except Exception:
-        pass
-    _ = re.compile(r"\b[a-zA-Z]{3,}\b")
-
-@app.get("/analytics/recent")
-def analytics_recent(limit: int = 50) -> Dict[str, Any]:
-    # Return last N events and lightweight aggregates
-    events = list(ANALYTICS_EVENTS)[-limit:]
-    count = len(ANALYTICS_EVENTS)
-    cache_hits = sum(1 for e in ANALYTICS_EVENTS if e.get("cache_hit"))
-    latencies = [e.get("overhead_ms", 0.0) for e in ANALYTICS_EVENTS if isinstance(e.get("overhead_ms"), (int, float))]
-    savings = [e.get("token_savings", 0) for e in ANALYTICS_EVENTS if isinstance(e.get("token_savings"), (int, float))]
-    stats = {
-        "events_total": count,
-        "cache_hit_rate": round(cache_hits / count, 4) if count else 0.0,
-        "avg_overhead_ms": round(statistics.mean(latencies), 3) if latencies else 0.0,
-        "avg_token_savings": round(statistics.mean(savings), 3) if savings else 0.0,
-    }
-    return {"events": events, "stats": stats}
+# ── /compose ─────────────────────────────────────────────────────────────────
 
 @app.post("/compose")
 def compose(req: ComposeRequest) -> Dict[str, Any]:
     t0 = time.perf_counter()
-    global REQUEST_COUNT
-
-    # 1) Normalize user input early to remove token waste
     normalized = normalize_text(req.prompt)
-
-    # 2) Build output instruction
-    instruction = output_instructions(req.output_mode)
-
-    # 3) Cache key + early return on hit 
+    instruction = _output_instructions(req.output_mode)
     key = cache.key_compose(normalized, instruction, req.model)
     cached = cache.get(key)
     if cached:
-        # Log analytics for cache hit
-        overhead_ms = (time.perf_counter() - t0) * 1000
-        log_event({
-            "endpoint": "compose",
-            "model": req.model,
-            "cache_hit": True,
-            "overhead_ms": round(overhead_ms, 3),
-            "input_tokens": cached.get("input_tokens"),
-            "token_savings": cached.get("token_savings"),
-        })
-        # Periodic cache sweep
-        REQUEST_COUNT += 1
-        if REQUEST_COUNT % 200 == 0:
-            cache.sweep()
+        _maybe_sweep()
         return cached
 
-    # 4) Build optimized_prompt from normalized input + instruction
     optimized_prompt = f"{instruction}\n\n{normalized}" if instruction else normalized
-
-    # 5) Compute tokens/costs and savings BEFORE creating payload
-    original_input_tokens = count_tokens_tiktoken(req.prompt)
-    optimized_input_tokens = count_tokens_tiktoken(optimized_prompt)
-
+    original_input_tokens = count_tokens(req.prompt, req.model)
+    optimized_input_tokens = count_tokens(optimized_prompt, req.model)
     token_savings = max(0, original_input_tokens - optimized_input_tokens)
     token_savings_pct = round(100.0 * token_savings / max(1, original_input_tokens), 2)
-
-    baseline_cost = estimate_cost(req.model, original_input_tokens, 0)  # cost on raw input
-    optimized_cost = estimate_cost(req.model, optimized_input_tokens, 0)
-
     overhead_ms = (time.perf_counter() - t0) * 1000
 
-    # 6) Create payload 
     payload = {
-        "model": req.model,
-        "optimized_prompt": optimized_prompt,
-        "normalized_prompt": normalized,
-        "instruction": instruction,
-        "input_tokens": optimized_input_tokens,
-        "estimated_cost_usd": round(optimized_cost, 6),
-        "overhead_ms": round(overhead_ms, 3),
-
-        # Savings metrics
-        "original_input_tokens": original_input_tokens,
-        "optimized_input_tokens": optimized_input_tokens,
-        "token_savings": token_savings,
-        "token_savings_pct": token_savings_pct,
-        "estimated_cost_usd_baseline": round(baseline_cost, 6),
+        "model":                    req.model,
+        "optimized_prompt":         optimized_prompt,
+        "normalized_prompt":        normalized,
+        "instruction":              instruction,
+        "input_tokens":             optimized_input_tokens,
+        "estimated_cost_usd":       round(_estimate_cost(req.model, optimized_input_tokens, 0), 6),
+        "overhead_ms":              round(overhead_ms, 3),
+        "original_input_tokens":    original_input_tokens,
+        "optimized_input_tokens":   optimized_input_tokens,
+        "token_savings":            token_savings,
+        "token_savings_pct":        token_savings_pct,
+        "estimated_cost_usd_baseline": round(_estimate_cost(req.model, original_input_tokens, 0), 6),
     }
-
-    # 7) Cache the complete payload so cache hits include savings fields
     cache.set(key, payload, ttl_s=180)
-    # Log analytics for normal path
-    log_event({
-        "endpoint": "compose",
-        "model": req.model,
-        "cache_hit": False,
-        "overhead_ms": round(overhead_ms, 3),
-        "input_tokens": optimized_input_tokens,
-        "token_savings": token_savings,
-    })
-    # Periodic cache sweep
-    REQUEST_COUNT += 1
-    if REQUEST_COUNT % 200 == 0:
-        cache.sweep()
+    _maybe_sweep()
     return payload
+
+
+# ── /chat ─────────────────────────────────────────────────────────────────────
 
 @app.post("/chat")
 def chat(req: ChatRequest) -> Dict[str, Any]:
     t0 = time.perf_counter()
-    global REQUEST_COUNT
-
-    # Prepare session state
     session = SESSIONS.setdefault(req.session_id, {"summary": "", "messages": []})
-
-    # Normalize new user message
     user_norm = normalize_text(req.user_message)
-
-    # Append to messages
     session["messages"].append({"role": "user", "content": user_norm})
-
-    # Concise output instructions
-    instruction = output_instructions(req.output_mode)
-
-    # Build context and enforce the budget via rolling summary
-    # Exclude the latest user message from context to avoid duplication
+    instruction = _output_instructions(req.output_mode)
     prior_messages = session["messages"][:-1]
-    context_text = format_context(session["summary"], prior_messages, req.recent_messages)
-    context_tokens = count_tokens_tiktoken(context_text)
+    context_text = _format_context(session["summary"], prior_messages, req.recent_messages)
+    context_tokens = count_tokens(context_text, req.model)
 
     if context_tokens > req.max_context_tokens:
-        # Compress older messages into a summary, keep only recent_n (excluding latest)
         older = prior_messages[:-req.recent_messages] if req.recent_messages > 0 else prior_messages
-        new_summary = summarize_messages(older, max_len=600)
-
-        # Merge summaries
+        new_summary = _summarize_messages(older, max_len=600)
         session["summary"] = (session["summary"] + " " + new_summary).strip() if session["summary"] else new_summary
-
-        # Keep only recent prior messages and reattach latest
         kept_prior = prior_messages[-req.recent_messages:] if req.recent_messages > 0 else []
         latest = session["messages"][-1]
         session["messages"] = kept_prior + [latest]
+        context_text = _format_context(session["summary"], kept_prior, req.recent_messages)
+        context_tokens = count_tokens(context_text, req.model)
 
-        # Recompute context based on kept prior messages
-        context_text = format_context(session["summary"], kept_prior, req.recent_messages)
-        context_tokens = count_tokens_tiktoken(context_text)
-
-    # Cache key for chat turn (based on compact context and latest user message)
     prior_for_key = session["messages"][:-1]
     recent_prior = prior_for_key[-req.recent_messages:] if req.recent_messages > 0 else []
     key = cache.key_chat(session["summary"], recent_prior, instruction, req.model, user_norm)
     cached = cache.get(key)
     if cached:
-        overhead_ms = (time.perf_counter() - t0) * 1000
-        log_event({
-            "endpoint": "chat",
-            "model": req.model,
-            "cache_hit": True,
-            "overhead_ms": round(overhead_ms, 3),
-            "context_tokens": cached.get("context_tokens"),
-            "input_tokens": cached.get("input_tokens"),
-        })
-        REQUEST_COUNT += 1
-        if REQUEST_COUNT % 200 == 0:
-            cache.sweep()
+        _maybe_sweep()
         return cached
 
-    # If still over budget after summarization, shrink recent window stepwise
     if context_tokens > req.max_context_tokens:
         shrink_n = max(0, req.recent_messages - 1)
+        prior_messages_local = session["messages"][:-1]
         while shrink_n > 0 and context_tokens > req.max_context_tokens:
-            kept_prior2 = prior_messages[-shrink_n:] if shrink_n > 0 else []
-            context_text = format_context(session["summary"], kept_prior2, shrink_n)
-            context_tokens = count_tokens_tiktoken(context_text)
+            kept = prior_messages_local[-shrink_n:] if shrink_n > 0 else []
+            context_text = _format_context(session["summary"], kept, shrink_n)
+            context_tokens = count_tokens(context_text, req.model)
             shrink_n -= 1
 
-    # Make the optimized prompt for LLM
-    # Keep context compact and enforce concise output
     optimized_prompt = (
         f"{instruction}\n\n{context_text}\nUser: {user_norm}\nAssistant:"
         if instruction else f"{context_text}\nUser: {user_norm}\nAssistant:"
     )
-
-    input_tokens = count_tokens_tiktoken(optimized_prompt)
+    input_tokens = count_tokens(optimized_prompt, req.model)
     overhead_ms = (time.perf_counter() - t0) * 1000
 
     payload = {
-        "session_id": req.session_id,
-        "model": req.model,
-        "instruction": instruction,
-        "optimized_prompt": optimized_prompt,
-        "context_tokens": context_tokens,
-        "input_tokens": input_tokens,
-        "estimated_cost_usd": round(estimate_cost(req.model, input_tokens, 0), 6),
-        "summary": session["summary"],
+        "session_id":          req.session_id,
+        "model":               req.model,
+        "instruction":         instruction,
+        "optimized_prompt":    optimized_prompt,
+        "context_tokens":      context_tokens,
+        "input_tokens":        input_tokens,
+        "estimated_cost_usd":  round(_estimate_cost(req.model, input_tokens, 0), 6),
+        "summary":             session["summary"],
         "recent_message_count": len(session["messages"]),
-        "overhead_ms": round(overhead_ms, 3),
+        "overhead_ms":         round(overhead_ms, 3),
     }
     cache.set(key, payload, ttl_s=120)
-    log_event({
-        "endpoint": "chat",
-        "model": req.model,
-        "cache_hit": False,
-        "overhead_ms": round(overhead_ms, 3),
-        "context_tokens": context_tokens,
-        "input_tokens": input_tokens,
-    })
-    REQUEST_COUNT += 1
-    if REQUEST_COUNT % 200 == 0:
-        cache.sweep()
+    _maybe_sweep()
     return payload
 
+
+# ── /chat/reset ───────────────────────────────────────────────────────────────
+
+@app.post("/chat/reset")
+def chat_reset(req: ResetRequest) -> Dict[str, Any]:
+    SESSIONS.pop(req.session_id, None)
+    delete_graph(req.session_id)
+    invalidate_session(req.session_id)
+    return {"reset": True, "session_id": req.session_id}
+
+
+# ── legacy cache endpoints ────────────────────────────────────────────────────
+
+@app.get("/cache/stats")
+def cache_stats() -> Dict[str, Any]:
+    return cache.stats()
+
+
+@app.post("/cache/sweep")
+def cache_sweep() -> Dict[str, Any]:
+    removed = cache.sweep()
+    return {"removed": removed, **cache.stats()}
+
+
+@app.post("/cache/clear")
+def cache_clear() -> Dict[str, Any]:
+    cache.clear()
+    return {"cleared": True, **cache.stats()}
+
+
+# ── legacy analytics ─────────────────────────────────────────────────────────
+
+@app.get("/analytics/recent")
+def analytics_recent(limit: int = 50) -> Dict[str, Any]:
+    events = obs.recent_events(limit=limit)
+    stats = obs.aggregate_stats(limit=limit)
+    return {"events": events, "stats": stats}
