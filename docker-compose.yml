@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  proxy:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # ── LLM API keys ──────────────────────────────────────────────────────
+      OPENAI_API_KEY:    ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+      # ── Dispatcher ────────────────────────────────────────────────────────
+      DISPATCH_DRY_RUN:   ${DISPATCH_DRY_RUN:-false}
+      LLM_MAX_RETRIES:    ${LLM_MAX_RETRIES:-3}
+      LLM_TIMEOUT_S:      ${LLM_TIMEOUT_S:-60}
+      LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-gpt-4o-mini}
+
+      # ── Store ─────────────────────────────────────────────────────────────
+      STORE_BACKEND: redis
+      REDIS_URL:     redis://redis:6379/0
+
+      # ── Auth (leave empty to disable) ─────────────────────────────────────
+      PROXY_API_KEY: ${PROXY_API_KEY:-}
+
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
