@@ -89,7 +89,10 @@ def run(
     # ------------------------------------------------------------------
     raw_sys_tokens = count_tokens(system_prompt, model)
     raw_hist_tokens = count_tokens_messages(history, model)
-    raw_tokens = raw_sys_tokens + raw_hist_tokens
+    raw_user_tokens = count_tokens(user_message, model)
+    # Include user_message so the baseline matches what the dispatcher
+    # actually sends to the LLM (user_message is always forwarded unchanged).
+    raw_tokens = raw_sys_tokens + raw_hist_tokens + raw_user_tokens
 
     # ------------------------------------------------------------------
     # Stage 2 – Structural compression of system prompt + each turn
@@ -101,9 +104,12 @@ def run(
     opt_history: list[dict] = []
     stage2_hist_saved = 0
     for msg in history:
-        r = structural_compress(msg.get("content") or "", mode=cfg.mode)
+        original_content = msg.get("content") or ""
+        r = structural_compress(original_content, mode=cfg.mode)
         opt_history.append({"role": msg.get("role", "user"), "content": r["text"]})
-        stage2_hist_saved += r.get("chars_saved", 0) // 4  # rough token estimate
+        # Use the real tokenizer instead of the rough chars/4 approximation
+        # to get accurate per-message structural savings.
+        stage2_hist_saved += max(0, count_tokens(original_content, model) - count_tokens(r["text"], model))
 
     savings["structural"] = max(0, stage2_sys_saved + stage2_hist_saved)
 
@@ -174,7 +180,11 @@ def run(
     # ------------------------------------------------------------------
     post_sys_tokens = count_tokens(opt_system, model)
     post_hist_tokens = count_tokens_messages(opt_history, model)
-    post_tokens = post_sys_tokens + post_hist_tokens
+    # user_message is never modified by the pipeline, so add it to both
+    # raw_tokens (Stage 1) and post_tokens so the comparison is symmetric.
+    # Without this, user_message tokens inflate raw_tokens and appear as
+    # phantom "savings" that weren't actually achieved by compression.
+    post_tokens = post_sys_tokens + post_hist_tokens + raw_user_tokens
 
     overall_confidence = min(confidences)
     compression_mode = "lossless" if cfg.mode == "lossless" else (

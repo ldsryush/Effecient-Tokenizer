@@ -240,7 +240,11 @@ async def chat_completions(
     # ── 5. Observability ──────────────────────────────────────────────────
     overhead_ms = (time.perf_counter() - t0) * 1000
     usage = llm_response.get("usage", {})
-    post_tokens_actual = usage.get("prompt_tokens", result.post_tokens)
+    # Use the pipeline's own post_tokens (measured the same way as raw_tokens)
+    # instead of usage.prompt_tokens from the LLM.  The LLM's prompt_tokens
+    # includes the user_message and summary injected by the dispatcher, which
+    # are NOT counted in raw_tokens — causing post > raw and 0 % savings.
+    post_tokens_actual = result.post_tokens
 
     telemetry = obs.record(
         request_id=request_id,
