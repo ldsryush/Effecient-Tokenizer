@@ -77,6 +77,15 @@ def _prewarm() -> None:
         count_tokens("Warmup text", "gpt-4o")
     except Exception:
         pass
+    # Prewarm the sentence-transformer model so the first real request
+    # doesn't pay the ~5-8s model-load cost.
+    try:
+        from .deduplicator import _get_st_model as _dedup_st
+        from .relevance import _get_st_model as _rel_st
+        _dedup_st()
+        _rel_st()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

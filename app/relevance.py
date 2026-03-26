@@ -22,6 +22,27 @@ from typing import Optional
 from .entity_graph import extract_entities, ConversationGraph
 
 
+# ---------------------------------------------------------------------------
+# Sentence-transformer singleton — loaded ONCE on first use, not per request
+# ---------------------------------------------------------------------------
+
+_ST_MODEL = None
+_ST_MODEL_LOADED = False
+
+def _get_st_model():
+    """Return the cached SentenceTransformer model, loading it once if needed."""
+    global _ST_MODEL, _ST_MODEL_LOADED
+    if _ST_MODEL_LOADED:
+        return _ST_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        _ST_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+    except Exception:
+        _ST_MODEL = None
+    _ST_MODEL_LOADED = True
+    return _ST_MODEL
+
+
 def _tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower())
 
@@ -34,9 +55,11 @@ def _keyword_similarity(a: str, b: str) -> float:
 
 
 def _try_sentence_transformer_scores(query: str, turns: list[str]) -> Optional[list[float]]:
+    model = _get_st_model()
+    if model is None:
+        return None
     try:
-        from sentence_transformers import SentenceTransformer, util  # type: ignore
-        model = SentenceTransformer("all-MiniLM-L6-v2")
+        from sentence_transformers import util  # type: ignore
         q_emb = model.encode(query, convert_to_tensor=True)
         t_embs = model.encode(turns, convert_to_tensor=True)
         scores = util.cos_sim(q_emb, t_embs)[0].tolist()

@@ -18,6 +18,27 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
+# Sentence-transformer singleton — loaded ONCE on first use, not per request
+# ---------------------------------------------------------------------------
+
+_ST_MODEL = None
+_ST_MODEL_LOADED = False
+
+def _get_st_model():
+    """Return the cached SentenceTransformer model, loading it once if needed."""
+    global _ST_MODEL, _ST_MODEL_LOADED
+    if _ST_MODEL_LOADED:
+        return _ST_MODEL
+    try:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        _ST_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+    except Exception:
+        _ST_MODEL = None
+    _ST_MODEL_LOADED = True
+    return _ST_MODEL
+
+
+# ---------------------------------------------------------------------------
 # Lightweight vector utilities
 # ---------------------------------------------------------------------------
 
@@ -51,9 +72,10 @@ def _cosine(a: dict[str, float], b: dict[str, float]) -> float:
 
 
 def _try_sentence_transformers(texts: list[str]) -> Optional[list[list[float]]]:
+    model = _get_st_model()
+    if model is None:
+        return None
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-        model = SentenceTransformer("all-MiniLM-L6-v2")
         embs = model.encode(texts, convert_to_numpy=True)
         return [e.tolist() for e in embs]
     except Exception:
