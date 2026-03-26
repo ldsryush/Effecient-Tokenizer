@@ -140,6 +140,7 @@ def dispatch(
     static_cache_hit: bool = False,
     summary: str = "",
     extra_params: Optional[dict] = None,
+    forwarded_api_key: Optional[str] = None,   # key forwarded from the calling app
 ) -> dict:
     """
     Send the optimised payload to the LLM and return a normalised response dict.
@@ -159,6 +160,16 @@ def dispatch(
     if _DRY_RUN:
         return _dry_run_response(model, system_prompt, history, user_message)
 
+    # Resolve API key: prefer forwarded key from calling app, fall back to env
+    _key_env = "ANTHROPIC_API_KEY" if _is_anthropic(model) else "OPENAI_API_KEY"
+    resolved_key = forwarded_api_key or os.environ.get(_key_env, "").strip()
+    if not resolved_key:
+        return _dry_run_response(
+            model, system_prompt, history, user_message,
+            note="[No API key provided — pass Authorization: Bearer sk-... in your request, or set "
+                 + _key_env + " env var]",
+        )
+
     params = extra_params or {}
     fallback_used = False
 
@@ -177,6 +188,7 @@ def dispatch(
                 summary=summary,
                 params=params,
                 fallback_used=fallback_used,
+                resolved_key=resolved_key,
             )
         except Exception as exc:
             err_str = str(exc)
@@ -215,6 +227,7 @@ def _single_dispatch(
     summary: str,
     params: dict,
     fallback_used: bool,
+    resolved_key: str = "",
 ) -> dict:
     t0 = time.perf_counter()
 
@@ -227,7 +240,7 @@ def _single_dispatch(
     messages.append({"role": "user", "content": user_message})
 
     if _is_anthropic(model):
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        api_key = resolved_key or os.environ.get("ANTHROPIC_API_KEY", "")
         headers = {
             "x-api-key":         api_key,
             "anthropic-version": "2023-06-01",
@@ -254,7 +267,7 @@ def _single_dispatch(
             "total_tokens":      usage_raw.get("input_tokens", 0) + usage_raw.get("output_tokens", 0),
         }
     else:
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        api_key = resolved_key or os.environ.get("OPENAI_API_KEY", "")
         if system_prompt:
             messages = [{"role": "system", "content": system_prompt}] + messages
         headers = {
@@ -294,13 +307,16 @@ def _single_dispatch(
     }
 
 
-def _dry_run_response(model: str, system_prompt: str, history: list[dict], user_message: str) -> dict:
+def _dry_run_response(
+    model: str, system_prompt: str, history: list[dict], user_message: str,
+    note: str = "[DRY RUN] No LLM call made. Set OPENAI_API_KEY or pass Authorization: Bearer sk-... in your request.",
+) -> dict:
     """Return a placeholder response for dry-run / testing mode."""
     approx_in = len(system_prompt.split()) + sum(len(m.get("content","").split()) for m in history) + len(user_message.split())
     return {
         "id":            "dry-run-0",
         "model":         model,
-        "content":       "[DRY RUN] No LLM call made.",
+        "content":       note,
         "usage":         {"prompt_tokens": approx_in, "completion_tokens": 0, "total_tokens": approx_in},
         "latency_ms":    0.0,
         "cache_hit":     False,

@@ -1,0 +1,95 @@
+{
+  "name": "efficient-tokenizer",
+  "displayName": "Efficient Tokenizer",
+  "description": "Drop-in LLM proxy with multi-stage token compression, entity graph memory, and live cost savings dashboard.",
+  "version": "2.0.0",
+  "publisher": "efficient-tokenizer",
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["AI", "Other"],
+  "icon": "media/icon.png",
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "efficientTokenizer.startProxy",
+        "title": "Efficient Tokenizer: Start Proxy Server"
+      },
+      {
+        "command": "efficientTokenizer.stopProxy",
+        "title": "Efficient Tokenizer: Stop Proxy Server"
+      },
+      {
+        "command": "efficientTokenizer.openDashboard",
+        "title": "Efficient Tokenizer: Open Dashboard"
+      },
+      {
+        "command": "efficientTokenizer.copyBaseUrl",
+        "title": "Efficient Tokenizer: Copy Proxy Base URL"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "efficientTokenizer",
+          "title": "Efficient Tokenizer",
+          "icon": "media/sidebar-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "efficientTokenizer": [
+        {
+          "type": "webview",
+          "id": "efficientTokenizer.dashboardView",
+          "name": "Dashboard"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Efficient Tokenizer",
+      "properties": {
+        "efficientTokenizer.port": {
+          "type": "number",
+          "default": 8000,
+          "description": "Port for the local proxy server."
+        },
+        "efficientTokenizer.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the proxy server when VS Code opens."
+        },
+        "efficientTokenizer.compressionMode": {
+          "type": "string",
+          "enum": ["lossy", "lossless"],
+          "default": "lossy",
+          "description": "Default compression mode for all requests."
+        },
+        "efficientTokenizer.dryRun": {
+          "type": "boolean",
+          "default": false,
+          "description": "Dry-run mode — run the compression pipeline but skip actual LLM calls."
+        },
+        "efficientTokenizer.openaiApiKey": {
+          "type": "string",
+          "default": "",
+          "description": "OpenAI API key forwarded to the proxy (leave empty to use OPENAI_API_KEY env var)."
+        }
+      }
+    },
+    "statusBar": {}
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "publish": "vsce publish"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^2.22.0",
+    "typescript": "^5.3.0"
+  }
+}

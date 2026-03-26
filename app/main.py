@@ -36,8 +36,10 @@ import uuid
 from collections import Counter, deque
 from typing import Any, Dict, List, Optional
 
+import os as _os
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # Internal modules
@@ -208,6 +210,17 @@ async def chat_completions(
     if req.max_tokens is not None:
         extra_params["max_tokens"] = req.max_tokens
 
+    # Extract the calling app's API key from the Authorization header so the
+    # proxy can forward it transparently — no env var required on the proxy.
+    import re as _re
+    forwarded_key: str | None = None
+    if authorization:
+        _m = _re.match(r"^Bearer\s+(.+)$", authorization.strip(), _re.IGNORECASE)
+        if _m:
+            forwarded_key = _m.group(1).strip()
+    if not forwarded_key and x_api_key:
+        forwarded_key = x_api_key.strip() or None
+
     llm_response = dispatch(
         system_prompt=result.system_prompt,
         history=result.history,
@@ -216,6 +229,7 @@ async def chat_completions(
         static_cache_hit=cache_result.static_cache_hit,
         summary=result.summary,
         extra_params=extra_params,
+        forwarded_api_key=forwarded_key,
     )
 
     # Register assistant reply in entity graph
@@ -339,6 +353,23 @@ def health() -> Dict[str, Any]:
         "store":  store.ping(),
         "version": "2.0.0",
     }
+
+
+# ===========================================================================
+# ── DASHBOARD ───────────────────────────────────────────────────────────────
+# ===========================================================================
+
+_DASHBOARD_PATH = _os.path.join(_os.path.dirname(__file__), "dashboard.html")
+
+
+@app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)
+def dashboard() -> HTMLResponse:
+    """Serve the built-in browser dashboard."""
+    try:
+        with open(_DASHBOARD_PATH, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    except FileNotFoundError:
+        return HTMLResponse(content="<h1>Dashboard not found</h1>", status_code=404)
 
 
 # ===========================================================================

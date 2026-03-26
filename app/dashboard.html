@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Efficient Tokenizer — Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #232636;
+    --green: #10b981; --teal: #14b8a6; --purple: #8b5cf6;
+    --orange: #f59e0b; --red: #ef4444; --text: #e2e8f0;
+    --muted: #64748b; --border: #2d3148;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 16px 24px; display: flex; align-items: center; gap: 12px; }
+  header h1 { font-size: 18px; font-weight: 700; }
+  .badge { background: var(--green); color: #000; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+  .badge.warn { background: var(--orange); }
+  main { padding: 24px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 20px; }
+  .card h2 { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px; }
+  .stat { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
+  .stat-label { color: var(--muted); font-size: 13px; }
+  .stat-value { font-size: 22px; font-weight: 700; color: var(--green); }
+  .stat-value.orange { color: var(--orange); }
+  .stat-value.purple { color: var(--purple); }
+  .stat-value.teal { color: var(--teal); }
+  .bar-wrap { margin-top: 6px; }
+  .bar-label { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .bar-bg { background: var(--surface2); border-radius: 4px; height: 8px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+  .bar-fill.green  { background: var(--green); }
+  .bar-fill.teal   { background: var(--teal); }
+  .bar-fill.purple { background: var(--purple); }
+  .bar-fill.orange { background: var(--orange); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); color: var(--text); }
+  tr:last-child td { border-bottom: none; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill.lossy    { background: #7c3aed22; color: var(--purple); }
+  .pill.lossless { background: #10b98122; color: var(--green); }
+  .conf-high { color: var(--green); }
+  .conf-mid  { color: var(--orange); }
+  .conf-low  { color: var(--red); }
+  #chat-box { display: flex; flex-direction: column; gap: 10px; }
+  .msg { padding: 10px 14px; border-radius: 8px; max-width: 90%; line-height: 1.5; font-size: 13px; }
+  .msg.user { background: var(--purple); color: #fff; align-self: flex-end; }
+  .msg.assistant { background: var(--surface2); border: 1px solid var(--border); align-self: flex-start; }
+  .msg.system { background: transparent; border: 1px dashed var(--border); color: var(--muted); font-size: 11px; align-self: center; text-align: center; }
+  .chat-input-wrap { display: flex; gap: 8px; margin-top: 12px; }
+  .chat-input-wrap input { flex: 1; background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 10px 14px; border-radius: 8px; font-size: 13px; outline: none; }
+  .chat-input-wrap input:focus { border-color: var(--purple); }
+  .chat-input-wrap button { background: var(--purple); color: #fff; border: none; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; }
+  .chat-input-wrap button:hover { opacity: 0.85; }
+  .scroll { max-height: 300px; overflow-y: auto; }
+  .full-width { grid-column: 1 / -1; }
+  .refresh-note { font-size: 11px; color: var(--muted); margin-top: 8px; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .status-dot.ok  { background: var(--green); }
+  .status-dot.err { background: var(--red); }
+  #model-select, #mode-select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 6px 10px; border-radius: 6px; font-size: 12px; }
+  .controls { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+  .controls label { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>Efficient Tokenizer</h1>
+    <div style="font-size:12px;color:var(--muted);margin-top:2px">Drop-in LLM proxy with token compression</div>
+  </div>
+  <span id="status-badge" class="badge warn">connecting...</span>
+  <span style="margin-left:auto;font-size:12px;color:var(--muted)" id="last-refresh">–</span>
+</header>
+
+<main>
+
+  <!-- Stats row -->
+  <div class="card">
+    <h2>Token Savings</h2>
+    <div class="stat">
+      <span class="stat-label">Total tokens saved</span>
+      <span class="stat-value" id="total-savings">–</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Avg % saved per request</span>
+      <span class="stat-value teal" id="avg-pct">–</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label"><span>Compression rate</span><span id="bar-pct-label">–</span></div>
+      <div class="bar-bg"><div class="bar-fill green" id="pct-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Cost Savings</h2>
+    <div class="stat">
+      <span class="stat-label">Total cost saved (USD)</span>
+      <span class="stat-value orange" id="total-cost">–</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Requests processed</span>
+      <span class="stat-value purple" id="total-events">–</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Avg confidence score</span>
+      <span class="stat-value teal" id="avg-conf">–</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Performance</h2>
+    <div class="stat">
+      <span class="stat-label">Avg overhead (ms)</span>
+      <span class="stat-value" id="avg-overhead">–</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label"><span>Overhead bar (cap 50ms)</span><span id="overhead-label">–</span></div>
+      <div class="bar-bg"><div class="bar-fill teal" id="overhead-bar" style="width:0%"></div></div>
+    </div>
+    <div class="stat" style="margin-top:12px">
+      <span class="stat-label">Min confidence (worst drop)</span>
+      <span id="min-conf" class="stat-value">–</span>
+    </div>
+  </div>
+
+  <!-- Savings by stage -->
+  <div class="card">
+    <h2>Savings by Stage</h2>
+    <div id="stage-bars">
+      <div class="refresh-note">Waiting for data...</div>
+    </div>
+  </div>
+
+  <!-- Attribution log -->
+  <div class="card full-width">
+    <h2>Attribution Log — Last 20 Requests</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Endpoint</th><th>Model</th>
+          <th>Raw tokens</th><th>Post tokens</th><th>% saved</th>
+          <th>Cost saved</th><th>Mode</th>
+        </tr></thead>
+        <tbody id="attr-tbody"><tr><td colspan="8" style="color:var(--muted);text-align:center">Loading...</td></tr></tbody>
+      </table>
+    </div>
+    <div class="refresh-note">Auto-refreshes every 5 seconds.</div>
+  </div>
+
+  <!-- Confidence log -->
+  <div class="card full-width">
+    <h2>Confidence Log — Lossy Operations</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>Time</th><th>Model</th><th>Mode</th>
+          <th>Confidence</th><th>Tokens dropped</th><th>Stages applied</th>
+        </tr></thead>
+        <tbody id="conf-tbody"><tr><td colspan="6" style="color:var(--muted);text-align:center">No lossy operations logged yet.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Per-endpoint breakdown -->
+  <div class="card full-width">
+    <h2>Per-Endpoint Breakdown</h2>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Requests</th><th>Token savings</th><th>Cost saved (USD)</th></tr></thead>
+      <tbody id="ep-tbody"><tr><td colspan="4" style="color:var(--muted);text-align:center">Loading...</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- Test chat -->
+  <div class="card full-width">
+    <h2>Test Chat (sends through the compression proxy)</h2>
+    <div class="controls">
+      <label>Model:</label>
+      <select id="model-select">
+        <option value="gpt-4o">gpt-4o</option>
+        <option value="gpt-4o-mini">gpt-4o-mini</option>
+        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+        <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet</option>
+      </select>
+      <label>Mode:</label>
+      <select id="mode-select">
+        <option value="lossy">lossy</option>
+        <option value="lossless">lossless</option>
+      </select>
+      <label style="margin-left:auto;font-size:11px;color:var(--muted)" id="last-meta"></label>
+    </div>
+    <div id="chat-box" class="scroll" style="min-height:120px">
+      <div class="msg system">Send a message to test the proxy. Requires DISPATCH_DRY_RUN=false and a valid API key.</div>
+    </div>
+    <div class="chat-input-wrap">
+      <input id="chat-input" type="text" placeholder="Type a message and press Enter..." />
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+</main>
+
+<script>
+const BASE = window.location.origin;
+const sessionId = 'dashboard-' + Math.random().toString(36).slice(2, 8);
+const chatHistory = [];
+
+function fmt(n) { return n == null ? '–' : Number(n).toLocaleString(); }
+function fmtPct(n) { return n == null ? '–' : Number(n).toFixed(1) + '%'; }
+function fmtCost(n) { return n == null ? '–' : '$' + Number(n).toFixed(6); }
+function fmtMs(n) { return n == null ? '–' : Number(n).toFixed(1) + ' ms'; }
+function fmtConf(n) {
+  const v = Number(n);
+  const cls = v >= 0.9 ? 'conf-high' : v >= 0.7 ? 'conf-mid' : 'conf-low';
+  return `<span class="${cls}">${(v * 100).toFixed(1)}%</span>`;
+}
+function timeAgo(ts) {
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString();
+}
+
+async function refresh() {
+  try {
+    const [metrics, attr, conf] = await Promise.all([
+      fetch(BASE + '/admin/metrics').then(r => r.json()),
+      fetch(BASE + '/admin/attribution?limit=20').then(r => r.json()),
+      fetch(BASE + '/admin/confidence-log?limit=20').then(r => r.json()),
+    ]);
+
+    // Status
+    document.getElementById('status-badge').textContent = 'live';
+    document.getElementById('status-badge').className = 'badge';
+    document.getElementById('last-refresh').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+    // Stats
+    document.getElementById('total-savings').textContent = fmt(metrics.total_token_savings);
+    document.getElementById('avg-pct').textContent = fmtPct(metrics.avg_pct_saved);
+    document.getElementById('total-cost').textContent = fmtCost(metrics.total_cost_usd_saved);
+    document.getElementById('total-events').textContent = fmt(metrics.events_total);
+    document.getElementById('avg-conf').textContent = fmtPct((metrics.avg_confidence || 0) * 100).replace('%%', '%');
+    document.getElementById('avg-overhead').textContent = fmtMs(metrics.avg_overhead_ms);
+    document.getElementById('avg-conf').textContent = ((metrics.avg_confidence || 0) * 100).toFixed(1) + '%';
+
+    const pct = Math.min(metrics.avg_pct_saved || 0, 100);
+    document.getElementById('pct-bar').style.width = pct + '%';
+    document.getElementById('bar-pct-label').textContent = fmtPct(pct);
+
+    const oh = Math.min((metrics.avg_overhead_ms || 0) / 50 * 100, 100);
+    document.getElementById('overhead-bar').style.width = oh + '%';
+    document.getElementById('overhead-label').textContent = fmtMs(metrics.avg_overhead_ms);
+
+    const mc = (metrics.min_confidence || 1) * 100;
+    const mcEl = document.getElementById('min-conf');
+    mcEl.textContent = mc.toFixed(1) + '%';
+    mcEl.className = 'stat-value ' + (mc >= 90 ? '' : mc >= 70 ? 'orange' : 'red');
+
+    // Stage bars — aggregate from attribution log
+    const stageTotals = {};
+    (attr.attribution || []).forEach(e => {
+      Object.entries(e.savings_by_stage || {}).forEach(([s, v]) => {
+        stageTotals[s] = (stageTotals[s] || 0) + v;
+      });
+    });
+    const maxStage = Math.max(1, ...Object.values(stageTotals));
+    const colors = {structural:'green', deduplication:'teal', relevance:'purple', summarization:'orange'};
+    const stageEl = document.getElementById('stage-bars');
+    if (Object.keys(stageTotals).length === 0) {
+      stageEl.innerHTML = '<div class="refresh-note">No data yet — send some requests first.</div>';
+    } else {
+      stageEl.innerHTML = Object.entries(stageTotals).map(([s, v]) => `
+        <div class="bar-wrap">
+          <div class="bar-label"><span>${s}</span><span>${fmt(v)} tokens</span></div>
+          <div class="bar-bg"><div class="bar-fill ${colors[s] || 'green'}" style="width:${(v/maxStage*100).toFixed(1)}%"></div></div>
+        </div>`).join('');
+    }
+
+    // Attribution table
+    const rows = (attr.attribution || []).slice().reverse();
+    document.getElementById('attr-tbody').innerHTML = rows.length === 0
+      ? '<tr><td colspan="8" style="color:var(--muted);text-align:center">No requests yet.</td></tr>'
+      : rows.map(e => `<tr>
+          <td>${timeAgo(e.ts)}</td>
+          <td style="color:var(--muted);font-size:11px">${e.endpoint || '–'}</td>
+          <td>${e.model || '–'}</td>
+          <td>${fmt(e.raw_tokens)}</td>
+          <td>${fmt(e.post_tokens)}</td>
+          <td style="color:var(--green)">${fmtPct(e.pct_saved)}</td>
+          <td style="color:var(--orange)">${fmtCost(e.cost_usd_saved)}</td>
+          <td></td>
+        </tr>`).join('');
+
+    // Confidence log
+    const crows = (conf.confidence_log || []).slice().reverse();
+    document.getElementById('conf-tbody').innerHTML = crows.length === 0
+      ? '<tr><td colspan="6" style="color:var(--muted);text-align:center">No lossy operations yet.</td></tr>'
+      : crows.map(e => `<tr>
+          <td>${timeAgo(e.ts)}</td>
+          <td>${e.model || '–'}</td>
+          <td><span class="pill ${e.compression_mode}">${e.compression_mode}</span></td>
+          <td>${fmtConf(e.confidence_score)}</td>
+          <td style="color:var(--orange)">${fmt(e.tokens_dropped)}</td>
+          <td style="color:var(--muted);font-size:11px">${(e.stages_applied || []).join(', ')}</td>
+        </tr>`).join('');
+
+    // Per-endpoint
+    const eps = metrics.by_endpoint || {};
+    document.getElementById('ep-tbody').innerHTML = Object.keys(eps).length === 0
+      ? '<tr><td colspan="4" style="color:var(--muted);text-align:center">No data yet.</td></tr>'
+      : Object.entries(eps).map(([ep, d]) => `<tr>
+          <td style="font-size:12px">${ep}</td>
+          <td>${fmt(d.count)}</td>
+          <td style="color:var(--green)">${fmt(d.token_savings)}</td>
+          <td style="color:var(--orange)">${fmtCost(d.cost_usd_saved)}</td>
+        </tr>`).join('');
+
+  } catch (e) {
+    document.getElementById('status-badge').textContent = 'offline';
+    document.getElementById('status-badge').className = 'badge warn';
+  }
+}
+
+// Chat
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+
+  const box = document.getElementById('chat-box');
+  chatHistory.push({ role: 'user', content: text });
+
+  box.innerHTML += `<div class="msg user">${escHtml(text)}</div>`;
+  box.scrollTop = box.scrollHeight;
+
+  const model = document.getElementById('model-select').value;
+  const mode = document.getElementById('mode-select').value;
+
+  try {
+    const res = await fetch(BASE + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model, messages: chatHistory,
+        compression_mode: mode,
+        session_id: sessionId,
+      }),
+    });
+    const data = await res.json();
+    const reply = data.choices?.[0]?.message?.content || '[no response]';
+    chatHistory.push({ role: 'assistant', content: reply });
+    box.innerHTML += `<div class="msg assistant">${escHtml(reply)}</div>`;
+
+    const mw = data._middleware;
+    if (mw) {
+      document.getElementById('last-meta').textContent =
+        `Last request: ${fmt(mw.raw_tokens)} -> ${fmt(mw.post_tokens)} tokens | saved ${fmtPct(mw.pct_saved)} | confidence ${((mw.confidence_score||1)*100).toFixed(0)}%`;
+    }
+  } catch (e) {
+    box.innerHTML += `<div class="msg system">Error: ${escHtml(e.message)}</div>`;
+  }
+  box.scrollTop = box.scrollHeight;
+  refresh();
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+document.getElementById('send-btn').addEventListener('click', sendChat);
+document.getElementById('chat-input').addEventListener('keydown', e => { if (e.key === 'Enter') sendChat(); });
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
