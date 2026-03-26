@@ -30,6 +30,7 @@ Exposes two interface groups:
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
@@ -38,7 +39,7 @@ from typing import Any, Dict, List, Optional
 
 import os as _os
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -292,7 +293,70 @@ async def chat_completions(
     # Store for future cache hits
     store_turn(cache_result.full_cache_key, response_payload, ttl_s=300)
 
+    # ── Streaming response (SSE) ────────────────────────────────────────────
+    # Cline and many other clients send stream=true.  We run the full
+    # (non-streaming) pipeline and then emit the result as two SSE chunks
+    # so the client's stream parser is satisfied.
+    if req.stream:
+        completion_id = response_payload.get("id", request_id)
+        model_name    = response_payload.get("model", req.model)
+        content_text  = llm_response.get("content", "")
+
+        def _sse_generator():
+            # chunk 1 — role delta
+            chunk1 = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": None}],
+                "_middleware": response_payload.get("_middleware"),
+            }
+            yield f"data: {json.dumps(chunk1)}\n\n"
+
+            # chunk 2 — full content in one shot
+            chunk2 = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {"content": content_text}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk2)}\n\n"
+
+            # chunk 3 — finish
+            chunk3 = {
+                "id": completion_id, "object": "chat.completion.chunk",
+                "model": model_name,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": response_payload.get("usage", {}),
+            }
+            yield f"data: {json.dumps(chunk3)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_sse_generator(), media_type="text/event-stream")
+
     return response_payload
+
+
+# ===========================================================================
+# ── MODELS ENDPOINT  GET /v1/models ─────────────────────────────────────────
+# ===========================================================================
+
+@app.get("/v1/models")
+def list_models() -> Dict[str, Any]:
+    """
+    Stub models list — required by the OpenAI SDK and Cline on startup.
+    Returns the models this proxy knows how to route.
+    """
+    _now = int(time.time())
+    models = [
+        {"id": "gpt-4o",                      "object": "model", "created": _now, "owned_by": "openai"},
+        {"id": "gpt-4o-mini",                 "object": "model", "created": _now, "owned_by": "openai"},
+        {"id": "gpt-4-turbo",                 "object": "model", "created": _now, "owned_by": "openai"},
+        {"id": "gpt-4",                       "object": "model", "created": _now, "owned_by": "openai"},
+        {"id": "gpt-3.5-turbo",               "object": "model", "created": _now, "owned_by": "openai"},
+        {"id": "claude-3-5-sonnet-20241022",   "object": "model", "created": _now, "owned_by": "anthropic"},
+        {"id": "claude-3-5-haiku-20241022",    "object": "model", "created": _now, "owned_by": "anthropic"},
+        {"id": "claude-3-opus-20240229",       "object": "model", "created": _now, "owned_by": "anthropic"},
+    ]
+    return {"object": "list", "data": models}
 
 
 # ===========================================================================
@@ -360,6 +424,12 @@ def health() -> Dict[str, Any]:
 # ===========================================================================
 
 _DASHBOARD_PATH = _os.path.join(_os.path.dirname(__file__), "dashboard.html")
+
+
+@app.get("/", include_in_schema=False)
+def root_redirect():
+    """Redirect root URL to the dashboard."""
+    return RedirectResponse(url="/dashboard")
 
 
 @app.get("/dashboard", response_class=HTMLResponse, include_in_schema=False)

@@ -54,12 +54,43 @@ class SplitPayload(BaseModel):
     model_info: dict = {}
 
 
+def _extract_text(content: object) -> str:
+    """
+    Normalise message content to a plain string.
+
+    OpenAI simple format:   "hello"
+    Multimodal / Cline:     [{"type": "text", "text": "hello"}, ...]
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                elif block.get("type") == "image_url":
+                    parts.append("[image]")
+                else:
+                    # Any other block type — grab any "text" key if present
+                    parts.append(str(block.get("text", "")))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(p for p in parts if p)
+    if content is None:
+        return ""
+    return str(content)
+
+
 def split_messages(messages: list[dict], model: str = "gpt-4o") -> SplitPayload:
     """
     Split an OpenAI-style messages list into the three parts:
       system_prompt – content of the first system message (may be "")
       history       – all non-system messages except the final user message
       user_message  – the last user turn (untouched)
+
+    Handles both plain-string content and multimodal content blocks
+    (the format Cline and vision models use).
     """
     if not messages:
         return SplitPayload(model_info=detect_model(model))
@@ -69,7 +100,7 @@ def split_messages(messages: list[dict], model: str = "gpt-4o") -> SplitPayload:
 
     for msg in messages:
         role = msg.get("role", "user")
-        content = msg.get("content") or ""
+        content = _extract_text(msg.get("content"))
         if role == "system" and not system_prompt:
             system_prompt = content
         else:

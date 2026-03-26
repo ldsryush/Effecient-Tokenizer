@@ -33,23 +33,24 @@ TELEMETRY_BUS: deque[dict] = deque(maxlen=1_000)
 CONFIDENCE_LOG: deque[dict] = deque(maxlen=1_000)
 ATTRIBUTION_LOG: deque[dict] = deque(maxlen=500)
 
-# Pricing table (USD per 1K tokens, input side)
-_COST_PER_1K: dict[str, float] = {
-    "gpt-4o":   5.00,
-    "gpt-4":    30.00,
-    "gpt-3.5":  0.50,
-    "gpt-5":    6.00,
-    "o1":       15.00,
-    "o3":       10.00,
+# Pricing table (USD per 1M tokens, input side — as quoted by providers)
+# e.g. GPT-4o = $5.00 per 1 million input tokens
+_COST_PER_1M: dict[str, float] = {
+    "gpt-4o":            5.00,
+    "gpt-4":            10.00,
+    "gpt-3.5":           0.50,
+    "gpt-5":             6.00,
+    "o1":               15.00,
+    "o3":               10.00,
     "claude-3-5-sonnet": 3.00,
-    "claude-3-opus":     15.00,
+    "claude-3-opus":    15.00,
     "claude-3-haiku":    0.25,
-    "claude":   3.00,
+    "claude":            3.00,
 }
 
-def _price_per_1k(model: str) -> float:
+def _price_per_1m(model: str) -> float:
     m = model.lower()
-    for key, price in _COST_PER_1K.items():
+    for key, price in _COST_PER_1M.items():
         if key in m:
             return price
     return 5.00  # default
@@ -79,8 +80,8 @@ def record(
     ts = time.time()
     token_savings = max(0, raw_tokens - post_tokens)
     pct_saved = round(100.0 * token_savings / max(1, raw_tokens), 2)
-    price = _price_per_1k(model)
-    cost_saved = round(token_savings / 1000 * price, 6)
+    price = _price_per_1m(model)
+    cost_saved = round(token_savings / 1_000_000 * price, 6)
 
     event: dict[str, Any] = {
         "request_id":      request_id,
