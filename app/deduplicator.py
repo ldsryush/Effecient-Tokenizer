@@ -18,24 +18,10 @@ from typing import Optional
 
 
 # ---------------------------------------------------------------------------
-# Sentence-transformer singleton — loaded ONCE on first use, not per request
+# Sentence-transformer singleton — shared across all modules via shared_models
 # ---------------------------------------------------------------------------
 
-_ST_MODEL = None
-_ST_MODEL_LOADED = False
-
-def _get_st_model():
-    """Return the cached SentenceTransformer model, loading it once if needed."""
-    global _ST_MODEL, _ST_MODEL_LOADED
-    if _ST_MODEL_LOADED:
-        return _ST_MODEL
-    try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-        _ST_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
-    except Exception:
-        _ST_MODEL = None
-    _ST_MODEL_LOADED = True
-    return _ST_MODEL
+from .shared_models import get_st_model as _get_st_model
 
 
 # ---------------------------------------------------------------------------

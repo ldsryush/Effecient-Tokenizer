@@ -22,6 +22,7 @@ Environment variables:
   DISPATCH_DRY_RUN      — if "true", skip actual API call (for testing)
 """
 from __future__ import annotations
+import asyncio
 import os
 import time
 import json
@@ -103,35 +104,47 @@ def _build_anthropic_payload(
 
 
 # ---------------------------------------------------------------------------
-# HTTP call (uses httpx if available, falls back to urllib)
+# Async HTTP call — non-blocking, uses httpx.AsyncClient
+# Falls back to a thread-pool executor for the urllib path so the event loop
+# is never blocked regardless of which HTTP backend is available.
 # ---------------------------------------------------------------------------
 
-def _http_post(url: str, headers: dict, payload: dict, timeout: float) -> dict:
+async def _http_post_async(url: str, headers: dict, payload: dict, timeout: float) -> dict:
+    """Async HTTP POST — never blocks the event loop."""
     try:
         import httpx  # type: ignore
-        r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
-        r.raise_for_status()
-        return r.json()
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
     except ImportError:
         pass
 
-    # urllib fallback
+    # urllib fallback — run in a thread so we don't block the event loop
     import urllib.request, urllib.error
-    data = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={**headers, "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+
+    def _sync_post() -> dict:
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data,
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {body}") from exc
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _sync_post)
 
 
 # ---------------------------------------------------------------------------
-# Core dispatch with retry + fallback
+# Core dispatch with retry + fallback  (async)
 # ---------------------------------------------------------------------------
 
-def dispatch(
+async def dispatch(
     *,
     system_prompt: str,
     history: list[dict],
@@ -179,7 +192,7 @@ def dispatch(
             fallback_used = True
 
         try:
-            return _single_dispatch(
+            return await _single_dispatch_async(
                 system_prompt=system_prompt,
                 history=history,
                 user_message=user_message,
@@ -197,7 +210,7 @@ def dispatch(
 
             if attempt < _MAX_RETRIES and (is_rate_limit or is_server_err):
                 backoff = min(2 ** attempt * 0.5, 8.0)
-                time.sleep(backoff)
+                await asyncio.sleep(backoff)   # non-blocking sleep
                 continue
 
             # Last attempt failed — return error response
@@ -217,7 +230,7 @@ def dispatch(
     return _dry_run_response(model, system_prompt, history, user_message)
 
 
-def _single_dispatch(
+async def _single_dispatch_async(
     *,
     system_prompt: str,
     history: list[dict],
@@ -255,7 +268,7 @@ def _single_dispatch(
             **params,
         )
         url = f"{_anthropic_url()}/messages"
-        raw = _http_post(url, headers, payload, _TIMEOUT_S)
+        raw = await _http_post_async(url, headers, payload, _TIMEOUT_S)
 
         content = ""
         if isinstance(raw.get("content"), list):
@@ -283,7 +296,7 @@ def _single_dispatch(
         # Remove internal hint before sending
         payload.pop("_cache_hint", None)
         url = f"{_openai_url()}/chat/completions"
-        raw = _http_post(url, headers, payload, _TIMEOUT_S)
+        raw = await _http_post_async(url, headers, payload, _TIMEOUT_S)
 
         choices = raw.get("choices", [])
         content = choices[0]["message"]["content"] if choices else ""

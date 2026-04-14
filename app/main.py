@@ -77,13 +77,13 @@ def _prewarm() -> None:
         count_tokens("Warmup text", "gpt-4o")
     except Exception:
         pass
-    # Prewarm the sentence-transformer model so the first real request
-    # doesn't pay the ~5-8s model-load cost.
+    # Prewarm the shared sentence-transformer singleton so the first real
+    # request doesn't pay the ~5-8s model-load cost.  Both deduplicator.py
+    # and relevance.py now delegate to shared_models.get_st_model(), so a
+    # single call here is sufficient for the whole process.
     try:
-        from .deduplicator import _get_st_model as _dedup_st
-        from .relevance import _get_st_model as _rel_st
-        _dedup_st()
-        _rel_st()
+        from .shared_models import get_st_model
+        get_st_model()
     except Exception:
         pass
 
@@ -231,7 +231,7 @@ async def chat_completions(
     if not forwarded_key and x_api_key:
         forwarded_key = x_api_key.strip() or None
 
-    llm_response = dispatch(
+    llm_response = await dispatch(
         system_prompt=result.system_prompt,
         history=result.history,
         user_message=split.user_message,

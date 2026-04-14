@@ -4,7 +4,7 @@ Supports OpenAI (tiktoken) and Anthropic (approximation) model families.
 """
 from __future__ import annotations
 import re
-from typing import Optional
+from typing import Any, Optional
 
 # Mapping of model name substrings → tiktoken encoding
 _TIKTOKEN_ENCODINGS: dict[str, str] = {
@@ -17,6 +17,22 @@ _TIKTOKEN_ENCODINGS: dict[str, str] = {
 }
 
 _ANTHROPIC_PREFIXES = ("claude",)
+
+# ---------------------------------------------------------------------------
+# Tiktoken encoder cache — instantiated once per encoding name, not per call.
+# tiktoken.get_encoding() is cheap after the first call (it returns a cached
+# object internally), but the Python-level dict lookup here avoids even that
+# overhead and makes the hot path a pure dict read.
+# ---------------------------------------------------------------------------
+_ENCODER_CACHE: dict[str, Any] = {}
+
+
+def _get_encoder(name: str) -> Any:
+    """Return a cached tiktoken encoder, creating it on first use."""
+    if name not in _ENCODER_CACHE:
+        import tiktoken  # type: ignore
+        _ENCODER_CACHE[name] = tiktoken.get_encoding(name)
+    return _ENCODER_CACHE[name]
 
 
 def _pick_tiktoken_encoding(model: str) -> str:
@@ -44,10 +60,9 @@ def count_tokens(text: str, model: str = "gpt-4o") -> int:
     if any(m.startswith(p) for p in _ANTHROPIC_PREFIXES):
         return _anthropic_estimate(text)
 
-    # tiktoken path
+    # tiktoken path — encoder is cached; only the encode() call runs each time
     try:
-        import tiktoken
-        enc = tiktoken.get_encoding(_pick_tiktoken_encoding(model))
+        enc = _get_encoder(_pick_tiktoken_encoding(model))
         return len(enc.encode(text))
     except Exception:
         return _fallback_count(text)
