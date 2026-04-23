@@ -114,12 +114,20 @@
   <div class="card">
     <h2>Performance</h2>
     <div class="stat">
-      <span class="stat-label">Avg overhead (ms)</span>
+      <span class="stat-label">Middleware pipeline (ms)</span>
       <span class="stat-value" id="avg-overhead">–</span>
     </div>
     <div class="bar-wrap">
-      <div class="bar-label"><span>Overhead bar (cap 50ms)</span><span id="overhead-label">–</span></div>
+      <div class="bar-label"><span>Pipeline overhead (cap 50ms)</span><span id="overhead-label">–</span></div>
       <div class="bar-bg"><div class="bar-fill teal" id="overhead-bar" style="width:0%"></div></div>
+    </div>
+    <div class="stat" style="margin-top:12px">
+      <span class="stat-label">LLM API latency (ms)</span>
+      <span class="stat-value orange" id="avg-llm-latency">–</span>
+    </div>
+    <div class="bar-wrap">
+      <div class="bar-label"><span>LLM latency (cap 15 000ms)</span><span id="llm-latency-label">–</span></div>
+      <div class="bar-bg"><div class="bar-fill orange" id="llm-latency-bar" style="width:0%"></div></div>
     </div>
     <div class="stat" style="margin-top:12px">
       <span class="stat-label">Min confidence (worst drop)</span>
@@ -251,6 +259,13 @@ async function refresh() {
     const oh = Math.min((metrics.avg_overhead_ms || 0) / 50 * 100, 100);
     document.getElementById('overhead-bar').style.width = oh + '%';
     document.getElementById('overhead-label').textContent = fmtMs(metrics.avg_overhead_ms);
+
+    // LLM latency (separate from middleware pipeline)
+    const llmLat = metrics.avg_llm_latency_ms || 0;
+    document.getElementById('avg-llm-latency').textContent = llmLat > 0 ? fmtMs(llmLat) : '– (dry run)';
+    const llmBar = Math.min(llmLat / 15000 * 100, 100);
+    document.getElementById('llm-latency-bar').style.width = llmBar + '%';
+    document.getElementById('llm-latency-label').textContent = llmLat > 0 ? fmtMs(llmLat) : 'no live LLM calls yet';
 
     const mc = (metrics.min_confidence || 1) * 100;
     const mcEl = document.getElementById('min-conf');

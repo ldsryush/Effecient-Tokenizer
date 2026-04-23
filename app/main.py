@@ -214,6 +214,10 @@ async def chat_completions(
         return cache_result.cached_response
 
     # ── 4. LLM dispatcher ─────────────────────────────────────────────────
+    # Stop the middleware timer BEFORE the LLM call so overhead_ms only
+    # reflects the pipeline processing cost, not the LLM's response time.
+    pipeline_ms = (time.perf_counter() - t0) * 1000
+
     extra_params: Dict[str, Any] = {}
     if req.temperature is not None:
         extra_params["temperature"] = req.temperature
@@ -231,6 +235,7 @@ async def chat_completions(
     if not forwarded_key and x_api_key:
         forwarded_key = x_api_key.strip() or None
 
+    t_llm = time.perf_counter()
     llm_response = await dispatch(
         system_prompt=result.system_prompt,
         history=result.history,
@@ -241,13 +246,14 @@ async def chat_completions(
         extra_params=extra_params,
         forwarded_api_key=forwarded_key,
     )
+    llm_latency_ms = (time.perf_counter() - t_llm) * 1000
 
     # Register assistant reply in entity graph
     if llm_response.get("content"):
         graph.add_turn("assistant", llm_response["content"])
 
     # ── 5. Observability ──────────────────────────────────────────────────
-    overhead_ms = (time.perf_counter() - t0) * 1000
+    overhead_ms = pipeline_ms   # middleware-only cost
     usage = llm_response.get("usage", {})
     # Use the pipeline's own post_tokens (measured the same way as raw_tokens)
     # instead of usage.prompt_tokens from the LLM.  The LLM's prompt_tokens
@@ -267,8 +273,9 @@ async def chat_completions(
         overhead_ms=overhead_ms,
         session_id=session_id,
         extra={
-            "cache_hit":    cache_result.full_cache_hit,
-            "fallback_used": llm_response.get("fallback_used", False),
+            "cache_hit":      cache_result.full_cache_hit,
+            "fallback_used":  llm_response.get("fallback_used", False),
+            "llm_latency_ms": round(llm_latency_ms, 3),
         },
     )
 

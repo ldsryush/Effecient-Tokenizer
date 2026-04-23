@@ -163,6 +163,7 @@ def aggregate_stats(limit: int = 1_000) -> dict:
     costs   = [e["cost_usd_saved"] for e in events]
     lats    = [e["overhead_ms"] for e in events]
     confs   = [e["confidence_score"] for e in events]
+    llm_lats = [e.get("llm_latency_ms", 0.0) for e in events if e.get("llm_latency_ms")]
 
     by_endpoint: dict[str, dict] = {}
     for e in events:
@@ -178,6 +179,7 @@ def aggregate_stats(limit: int = 1_000) -> dict:
         "total_cost_usd_saved": round(sum(costs), 6),
         "avg_pct_saved":        round(statistics.mean(pcts), 2) if pcts else 0.0,
         "avg_overhead_ms":      round(statistics.mean(lats), 3) if lats else 0.0,
+        "avg_llm_latency_ms":   round(statistics.mean(llm_lats), 3) if llm_lats else 0.0,
         "avg_confidence":       round(statistics.mean(confs), 4) if confs else 1.0,
         "min_confidence":       round(min(confs), 4) if confs else 1.0,
         "by_endpoint":          by_endpoint,
@@ -191,6 +193,7 @@ def _empty_stats() -> dict:
         "total_cost_usd_saved": 0.0,
         "avg_pct_saved": 0.0,
         "avg_overhead_ms": 0.0,
+        "avg_llm_latency_ms": 0.0,
         "avg_confidence": 1.0,
         "min_confidence": 1.0,
         "by_endpoint": {},
