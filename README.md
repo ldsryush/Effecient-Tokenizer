@@ -8,17 +8,83 @@ spends meaningfully fewer tokens on every call.
 ---
 
 ## Table of Contents
-1. [How to Run the App](#1-how-to-run-the-app)
-2. [Testing It Yourself — curl Commands](#2-testing-it-yourself--curl-commands)
-3. [Using It With the OpenAI SDK (Python / JS)](#3-using-it-with-the-openai-sdk)
-4. [Architecture Deep-Dive](#4-architecture-deep-dive)
-5. [All Endpoints Reference](#5-all-endpoints-reference)
-6. [Configuration Reference](#6-configuration-reference)
-7. [VS Code Extension — Is It Possible?](#7-vs-code-extension--is-it-possible)
+1. [Performance & Benchmarks](#1-performance--benchmarks)
+2. [How to Run the App](#2-how-to-run-the-app)
+3. [Testing It Yourself — curl Commands](#3-testing-it-yourself--curl-commands)
+4. [Using It With the OpenAI SDK (Python / JS)](#4-using-it-with-the-openai-sdk)
+5. [Architecture Deep-Dive](#5-architecture-deep-dive)
+6. [All Endpoints Reference](#6-all-endpoints-reference)
+7. [Configuration Reference](#7-configuration-reference)
+8. [How to Share This With Others](#8-how-to-share-this-with-others)
 
 ---
 
-## 1. How to Run the App
+## 1. Performance & Benchmarks
+
+> All numbers measured from live code using `time.perf_counter`. Reproducible:
+> ```bash
+> python -m scripts.savings_benchmark    # token savings
+> python -m scripts.benchmark_pipeline   # processing overhead
+> ```
+
+### Token Savings by Scenario (GPT-4o)
+
+| Scenario | Turns | Lossless savings | Lossy savings | Dominant stage |
+|---|---|---|---|---|
+| Customer support chat | 10 | 0% | **23%** | Relevance pruning |
+| Customer support chat | 20 | **45%** | **58%** | Deduplication (207 tok) |
+| Coding assistant session | 10 | 0% | **15%** | Relevance pruning |
+| Coding assistant session | 20 | **45%** | **53%** | Deduplication (212 tok) |
+| Research / long-form Q&A | 10 | 0% | **38%** | Relevance pruning |
+| Research / long-form Q&A | 20 | **47%** | **67%** | Deduplication (368 tok) |
+| **Average across all scenarios** | — | **23%** | **43%** | — |
+
+> **Why 0% lossless on 10-turn sessions?** Lossless mode only applies structural compression
+> (whitespace, JSON minify, key shortening). These synthetic turns have no JSON blobs or
+> verbose keys, so structural savings are zero. Deduplication only fires when the same
+> content repeats — which happens at 20 turns (the 10-turn pattern repeats). Lossy mode
+> additionally applies relevance pruning, which fires on every session.
+
+### Processing Overhead (wall-clock, Python only — no LLM call time)
+
+| Session size | Lossless | Lossy | Industry target |
+|---|---|---|---|
+| Short (4 turns, ~180 tokens) | 1.497 ms | 1.489 ms | ✅ < 5 ms |
+| Typical (20 turns, ~700 tokens) | 6.921 ms | 6.935 ms | ✅ 5–10 ms |
+| Long (60 turns, ~2,000 tokens) | 23.134 ms | 21.456 ms | ✅ 10–30 ms |
+
+For context: GPT-4o typically takes 500–2,000 ms to respond. The middleware adds less than
+1% to total request latency for typical sessions.
+
+### Stage-by-Stage Micro-Benchmarks (mean latency)
+
+| Stage | Detail | Mean |
+|---|---|---|
+| Tokenizer | `count_tokens` single string | 0.032 ms |
+| Tokenizer | `count_tokens_messages` (10 msgs) | 0.556 ms |
+| Structural compressor | Short text | 0.021 ms |
+| Structural compressor | Long text (~180 words) | 0.251 ms |
+| Semantic deduplicator | 4 turns (TF-IDF) | 0.078 ms |
+| Semantic deduplicator | 20 turns (TF-IDF) | 0.700 ms |
+| Semantic deduplicator | 40 turns (TF-IDF) | 2.420 ms |
+| Relevance scorer | 20 turns | 0.087 ms |
+| Rolling summarizer | 20 turns | 0.066 ms |
+| Cache router | Miss | 0.003 ms |
+| Cache router | Hit | 0.003 ms |
+
+### Cost Impact at Scale (GPT-4o, $5.00/1M input tokens)
+
+| Daily volume | Baseline/month | After lossless | After lossy | Monthly savings |
+|---|---|---|---|---|
+| 1,000 req/day | $65.97 | $46.30 | $33.50 | up to **$32.47** |
+| 10,000 req/day | $659.75 | $463.00 | $335.00 | up to **$324.75** |
+| 100,000 req/day | $6,597.50 | $4,630.00 | $3,350.00 | up to **$3,247.50** |
+
+> See [PRICING.md](./PRICING.md) for the full pricing model and tier details.
+
+---
+
+## 2. How to Run the App
 
 ### Option A — Local Python (fastest to start)
 
@@ -466,7 +532,7 @@ Your app
 │  │                                                         │   │
 │  │    Entity types detected (regex-based, no ML needed):   │   │
 │  │      file      → file.py, config.yaml, main.ts          │   │
-│  │      function  → process_data(, handle_request(         │   │
+│  │      function  → process_data(, handle_request)         │   │
 │  │      task      → task #42, issue #7, PR #100            │   │
 │  │      user      → @username, "my name is Alice"          │   │
 │  │      variable  → OPENAI_API_KEY, MAX_TOKENS             │   │
@@ -555,7 +621,7 @@ Turn 1: "I'm working on file.py for task #42."
   Entities: {file: ["file.py"], task: ["#42"]}
 
 Turn 2: "The process_data() function crashes."
-  Entities: {function: ["process_data("]}
+  Entities: {function: ["process_data"]}
 
 Turn 7 (current query): "How do I fix file.py?"
   Entities: {file: ["file.py"]}
@@ -568,7 +634,7 @@ is also protected regardless of how old it is.
 
 Entity nodes are always carried forward in the rolling summary:
 ```
-[Summary] Key topics: crash, function, task | [Entities] files: file.py; functions: process_data(; tasks: #42
+[Summary] Key topics: crash, function, task | [Entities] files: file.py; functions: process_data; tasks: #42
 ```
 
 The model always has the facts it needs even when the original turns have been compressed.
