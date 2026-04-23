@@ -35,14 +35,41 @@ _STOP_WORDS = {
 }
 
 
-def _keyword_summary(texts: list[str], max_keywords: int = 15, max_len: int = 600) -> str:
-    combined = " ".join(texts)
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", combined.lower())
-    freq = Counter(w for w in words if w not in _STOP_WORDS)
-    top = [w for w, _ in freq.most_common(max_keywords)]
-    if not top:
-        return combined[:max_len]
-    return f"[Summary] Key topics: {', '.join(top)}"[:max_len]
+def _extractive_summary(texts: list[str], max_sentences: int = 4, max_len: int = 500) -> str:
+    """
+    Extractive summarization: pick the highest-signal sentences from the
+    compressed turns rather than just listing keywords.  This gives the LLM
+    actual context (specific values, error messages, decisions) while using
+    far fewer tokens than the original turns.
+
+    Scoring: TF-weighted sentence score — sentences containing the most
+    frequent non-stop words rank highest.
+    """
+    # Split every turn into sentences
+    sentences: list[str] = []
+    for t in texts:
+        for s in re.split(r'(?<=[.!?])\s+', t.strip()):
+            s = s.strip()
+            if len(s.split()) >= 4:          # skip fragments
+                sentences.append(s)
+
+    if not sentences:
+        # Fallback: just truncate the raw text
+        return " ".join(texts)[:max_len]
+
+    # Build word-frequency table across all sentences
+    all_words = " ".join(sentences).lower().split()
+    freq = Counter(w for w in all_words if w not in _STOP_WORDS and len(w) > 3)
+
+    def _score(sentence: str) -> float:
+        words = sentence.lower().split()
+        return sum(freq.get(w, 0) for w in words) / max(1, len(words))
+
+    # Rank and pick top sentences, preserving original order
+    ranked = sorted(range(len(sentences)), key=lambda i: _score(sentences[i]), reverse=True)
+    top_indices = sorted(ranked[:max_sentences])
+    summary = " ".join(sentences[i] for i in top_indices)
+    return summary[:max_len]
 
 
 def _entity_line(graph: ConversationGraph) -> str:
@@ -94,7 +121,7 @@ def rolling_summarize(
         }
 
     texts = [m.get("content") or "" for m in turns_to_compress]
-    keyword_sum = _keyword_summary(texts, max_keywords=15, max_len=400)
+    keyword_sum = _extractive_summary(texts, max_sentences=4, max_len=400)
 
     # Build entity line from the graph so entities survive compression
     entity_line = _entity_line(graph) if graph else ""

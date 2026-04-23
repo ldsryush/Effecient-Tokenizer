@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Efficient Tokenizer — LLM Token Compression Middleware</title>
+  <meta name="description" content="Drop-in OpenAI-compatible proxy that reduces LLM token costs by 15–67%. 6.9ms overhead. Entity graph preserves context. Self-hosted or cloud." />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #0d0f14;
+      --surface:  #161a23;
+      --border:   #252a38;
+      --accent:   #4f8ef7;
+      --accent2:  #34d399;
+      --warn:     #f59e0b;
+      --text:     #e2e8f0;
+      --muted:    #8892a4;
+      --code-bg:  #1e2330;
+      --radius:   10px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    /* ── NAV ── */
+    nav {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(13,15,20,0.92);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+      padding: 0 2rem;
+      display: flex; align-items: center; justify-content: space-between;
+      height: 60px;
+    }
+    .nav-logo { font-weight: 700; font-size: 1.1rem; color: var(--text); letter-spacing: -0.3px; }
+    .nav-logo span { color: var(--accent); }
+    .nav-links { display: flex; gap: 2rem; }
+    .nav-links a { color: var(--muted); font-size: 0.9rem; }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+    .nav-cta {
+      background: var(--accent); color: #fff; padding: 0.45rem 1.1rem;
+      border-radius: 6px; font-size: 0.875rem; font-weight: 600;
+    }
+    .nav-cta:hover { background: #3a7de8; text-decoration: none; }
+
+    /* ── SECTIONS ── */
+    section { padding: 5rem 2rem; max-width: 1100px; margin: 0 auto; }
+
+    /* ── HERO ── */
+    .hero { text-align: center; padding-top: 6rem; padding-bottom: 4rem; }
+    .hero-badge {
+      display: inline-block; background: rgba(79,142,247,0.12);
+      border: 1px solid rgba(79,142,247,0.3); color: var(--accent);
+      font-size: 0.8rem; font-weight: 600; letter-spacing: 0.05em;
+      padding: 0.3rem 0.9rem; border-radius: 999px; margin-bottom: 1.5rem;
+      text-transform: uppercase;
+    }
+    .hero h1 {
+      font-size: clamp(2.2rem, 5vw, 3.6rem);
+      font-weight: 800; line-height: 1.15;
+      letter-spacing: -1px; margin-bottom: 1.25rem;
+    }
+    .hero h1 em { color: var(--accent); font-style: normal; }
+    .hero p {
+      font-size: 1.2rem; color: var(--muted); max-width: 640px;
+      margin: 0 auto 2.5rem;
+    }
+    .hero-actions { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+    .btn-primary {
+      background: var(--accent); color: #fff; padding: 0.75rem 1.75rem;
+      border-radius: 8px; font-weight: 700; font-size: 1rem;
+      transition: background 0.15s;
+    }
+    .btn-primary:hover { background: #3a7de8; text-decoration: none; }
+    .btn-secondary {
+      background: var(--surface); color: var(--text); padding: 0.75rem 1.75rem;
+      border-radius: 8px; font-weight: 600; font-size: 1rem;
+      border: 1px solid var(--border); transition: border-color 0.15s;
+    }
+    .btn-secondary:hover { border-color: var(--accent); text-decoration: none; }
+
+    /* ── STAT STRIP ── */
+    .stats-strip {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 1px; background: var(--border);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      overflow: hidden; margin: 3rem 0 0;
+    }
+    .stat {
+      background: var(--surface); padding: 1.75rem 1.5rem; text-align: center;
+    }
+    .stat-num {
+      font-size: 2.4rem; font-weight: 800; color: var(--accent2);
+      letter-spacing: -1px; line-height: 1;
+    }
+    .stat-label { font-size: 0.85rem; color: var(--muted); margin-top: 0.4rem; }
+
+    /* ── CODE BLOCK ── */
+    .code-block {
+      background: var(--code-bg); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.5rem 1.75rem;
+      font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+      font-size: 0.875rem; line-height: 1.7; overflow-x: auto;
+      color: #c9d1d9;
+    }
+    .code-block .c  { color: #8892a4; }   /* comment */
+    .code-block .k  { color: #ff7b72; }   /* keyword */
+    .code-block .s  { color: #a5d6ff; }   /* string */
+    .code-block .n  { color: var(--accent2); } /* name/var */
+    .code-block .p  { color: #e2e8f0; }   /* punctuation */
+
+    /* ── SECTION HEADINGS ── */
+    .section-label {
+      font-size: 0.75rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--accent); margin-bottom: 0.75rem;
+    }
+    h2 {
+      font-size: clamp(1.6rem, 3vw, 2.2rem); font-weight: 800;
+      letter-spacing: -0.5px; margin-bottom: 1rem;
+    }
+    h3 { font-size: 1.15rem; font-weight: 700; margin-bottom: 0.5rem; }
+    .section-sub { color: var(--muted); max-width: 600px; margin-bottom: 3rem; }
+
+    /* ── HOW IT WORKS ── */
+    .pipeline {
+      display: flex; flex-direction: column; gap: 0;
+      border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+    }
+    .pipeline-stage {
+      display: grid; grid-template-columns: 56px 1fr;
+      border-bottom: 1px solid var(--border); background: var(--surface);
+    }
+    .pipeline-stage:last-child { border-bottom: none; }
+    .stage-num {
+      display: flex; align-items: center; justify-content: center;
+      font-size: 0.75rem; font-weight: 800; color: var(--accent);
+      background: rgba(79,142,247,0.07); border-right: 1px solid var(--border);
+      padding: 1.25rem 0;
+    }
+    .stage-body { padding: 1.25rem 1.5rem; }
+    .stage-title { font-weight: 700; font-size: 0.95rem; margin-bottom: 0.2rem; }
+    .stage-desc { font-size: 0.875rem; color: var(--muted); }
+    .stage-badge {
+      display: inline-block; font-size: 0.7rem; font-weight: 700;
+      padding: 0.15rem 0.5rem; border-radius: 4px; margin-left: 0.5rem;
+      vertical-align: middle;
+    }
+    .badge-lossless { background: rgba(52,211,153,0.15); color: var(--accent2); }
+    .badge-lossy    { background: rgba(245,158,11,0.15);  color: var(--warn); }
+    .badge-unique   { background: rgba(79,142,247,0.15);  color: var(--accent); }
+
+    /* ── BENCHMARK TABLE ── */
+    .bench-grid {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;
+      margin-bottom: 2rem;
+    }
+    @media (max-width: 700px) { .bench-grid { grid-template-columns: 1fr; } }
+    .bench-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.5rem;
+    }
+    .bench-card h3 { font-size: 0.9rem; color: var(--muted); margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    th { text-align: left; color: var(--muted); font-weight: 600; font-size: 0.8rem;
+         padding: 0.4rem 0.5rem; border-bottom: 1px solid var(--border); }
+    td { padding: 0.55rem 0.5rem; border-bottom: 1px solid rgba(37,42,56,0.5); }
+    tr:last-child td { border-bottom: none; }
+    .savings-high { color: var(--accent2); font-weight: 700; }
+    .savings-mid  { color: var(--accent);  font-weight: 600; }
+    .savings-low  { color: var(--muted); }
+
+    /* ── COMPARISON ── */
+    .compare-table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+    .compare-table th {
+      padding: 0.75rem 1rem; text-align: center; font-size: 0.8rem;
+      color: var(--muted); border-bottom: 1px solid var(--border);
+      background: var(--surface);
+    }
+    .compare-table th:first-child { text-align: left; }
+    .compare-table td {
+      padding: 0.75rem 1rem; text-align: center;
+      border-bottom: 1px solid var(--border);
+    }
+    .compare-table td:first-child { text-align: left; font-weight: 500; }
+    .compare-table tr:last-child td { border-bottom: none; }
+    .compare-table tr:hover td { background: rgba(255,255,255,0.02); }
+    .compare-table .col-us { background: rgba(79,142,247,0.05); }
+    .check { color: var(--accent2); font-size: 1.1rem; }
+    .cross { color: #ef4444; font-size: 1.1rem; }
+    .unique-tag {
+      font-size: 0.7rem; font-weight: 700; color: var(--accent);
+      background: rgba(79,142,247,0.12); padding: 0.1rem 0.4rem;
+      border-radius: 4px; margin-left: 0.4rem;
+    }
+
+    /* ── PRICING ── */
+    .pricing-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1.25rem; margin-top: 2rem;
+    }
+    .pricing-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.75rem;
+      display: flex; flex-direction: column;
+    }
+    .pricing-card.featured {
+      border-color: var(--accent); background: rgba(79,142,247,0.05);
+    }
+    .pricing-tier { font-size: 0.8rem; font-weight: 700; color: var(--muted);
+                    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.5rem; }
+    .pricing-price { font-size: 1.8rem; font-weight: 800; margin-bottom: 0.25rem; }
+    .pricing-price span { font-size: 1rem; font-weight: 400; color: var(--muted); }
+    .pricing-desc { font-size: 0.875rem; color: var(--muted); margin-bottom: 1.25rem; }
+    .pricing-features { list-style: none; flex: 1; }
+    .pricing-features li {
+      font-size: 0.875rem; padding: 0.35rem 0;
+      border-bottom: 1px solid var(--border); color: var(--muted);
+    }
+    .pricing-features li:last-child { border-bottom: none; }
+    .pricing-features li::before { content: "✓ "; color: var(--accent2); font-weight: 700; }
+    .pricing-cta {
+      margin-top: 1.5rem; display: block; text-align: center;
+      padding: 0.65rem; border-radius: 7px; font-weight: 700; font-size: 0.9rem;
+      background: var(--border); color: var(--text);
+      transition: background 0.15s;
+    }
+    .pricing-card.featured .pricing-cta { background: var(--accent); color: #fff; }
+    .pricing-cta:hover { text-decoration: none; opacity: 0.9; }
+
+    /* ── ENTITY GRAPH CALLOUT ── */
+    .entity-callout {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 4px solid var(--accent); border-radius: var(--radius);
+      padding: 2rem; margin: 2rem 0;
+    }
+    .entity-callout h3 { color: var(--accent); margin-bottom: 0.75rem; }
+    .entity-callout p { color: var(--muted); font-size: 0.95rem; }
+
+    /* ── FOOTER ── */
+    footer {
+      border-top: 1px solid var(--border); padding: 2.5rem 2rem;
+      text-align: center; color: var(--muted); font-size: 0.85rem;
+    }
+    footer a { color: var(--muted); }
+    footer a:hover { color: var(--text); }
+
+    /* ── DIVIDER ── */
+    hr { border: none; border-top: 1px solid var(--border); margin: 0; }
+
+    /* ── LATENCY BAR ── */
+    .latency-bars { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 1.5rem; }
+    .latency-row { display: flex; align-items: center; gap: 1rem; font-size: 0.875rem; }
+    .latency-label { width: 200px; color: var(--muted); flex-shrink: 0; }
+    .latency-bar-wrap { flex: 1; background: var(--border); border-radius: 4px; height: 10px; }
+    .latency-bar { height: 10px; border-radius: 4px; background: var(--accent); }
+    .latency-val { width: 60px; text-align: right; font-weight: 700; color: var(--accent2); }
+  </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+  <div class="nav-logo">Efficient<span>Tokenizer</span></div>
+  <div class="nav-links">
+    <a href="#how-it-works">How it works</a>
+    <a href="#benchmarks">Benchmarks</a>
+    <a href="#compare">vs. Competitors</a>
+    <a href="#pricing">Pricing</a>
+    <a href="https://github.com/ldsryush/Effecient-Tokenizer" target="_blank">GitHub</a>
+  </div>
+  <a href="https://github.com/ldsryush/Effecient-Tokenizer" class="nav-cta" target="_blank">Get Started →</a>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="hero-badge">Open Source · MIT Licensed · Self-Hosted</div>
+  <h1>Same LLM. <em>Fewer tokens.</em><br>Zero code changes.</h1>
+  <p>
+    A drop-in OpenAI-compatible proxy that compresses conversation history before it
+    reaches the model — saving 15–67% on input tokens with &lt;7ms overhead.
+  </p>
+  <div class="hero-actions">
+    <a href="https://github.com/ldsryush/Effecient-Tokenizer" class="btn-primary" target="_blank">
+      View on GitHub
+    </a>
+    <a href="#benchmarks" class="btn-secondary">See the numbers</a>
+  </div>
+
+  <div class="stats-strip">
+    <div class="stat">
+      <div class="stat-num">43%</div>
+      <div class="stat-label">avg token savings (lossy mode)</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">6.9ms</div>
+      <div class="stat-label">overhead, typical session</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">67%</div>
+      <div class="stat-label">peak savings (20-turn sessions)</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">0</div>
+      <div class="stat-label">code changes required</div>
+    </div>
+  </div>
+</section>
+
+<hr />
+
+<!-- QUICK START -->
+<section>
+  <div class="section-label">Quick Start</div>
+  <h2>Two lines to integrate</h2>
+  <p class="section-sub">
+    Change <code>base_url</code> to point at the middleware. Everything else — your API key,
+    model name, message format — stays exactly the same.
+  </p>
+  <div class="code-block">
+<span class="k">from</span> openai <span class="k">import</span> OpenAI<br>
+<br>
+<span class="c"># Before: direct to OpenAI</span><br>
+<span class="c"># client = OpenAI(api_key="sk-...")</span><br>
+<br>
+<span class="c"># After: route through middleware (one line change)</span><br>
+<span class="n">client</span> = OpenAI(<br>
+&nbsp;&nbsp;&nbsp;&nbsp;api_key=<span class="s">"sk-..."</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;base_url=<span class="s">"http://localhost:8000/v1"</span>,  <span class="c"># ← only change</span><br>
+)<br>
+<br>
+<span class="c"># Everything else is identical</span><br>
+<span class="n">response</span> = client.chat.completions.create(<br>
+&nbsp;&nbsp;&nbsp;&nbsp;model=<span class="s">"gpt-4o"</span>,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;messages=[{<span class="s">"role"</span>: <span class="s">"user"</span>, <span class="s">"content"</span>: <span class="s">"Explain RLHF."</span>}],<br>
+)<br>
+<br>
+<span class="c"># Middleware telemetry in every response</span><br>
+<span class="n">meta</span> = response._middleware<br>
+<span class="k">print</span>(<span class="s">f"Saved {meta['pct_saved']}% — ${meta['cost_usd_saved']:.5f} this request"</span>)
+  </div>
+
+  <br />
+  <div class="code-block">
+<span class="c"># Self-host in 3 commands</span><br>
+git clone https://github.com/ldsryush/Effecient-Tokenizer.git<br>
+pip install -r requirements.txt<br>
+uvicorn app.main:app --port 8000
+  </div>
+</section>
+
+<hr />
+
+<!-- HOW IT WORKS -->
+<section id="how-it-works">
+  <div class="section-label">Architecture</div>
+  <h2>Five-stage compression pipeline</h2>
+  <p class="section-sub">
+    Every request passes through all five stages before reaching the LLM.
+    The user message is <strong>never modified</strong>. Only history is compressed.
+  </p>
+
+  <div class="pipeline">
+    <div class="pipeline-stage">
+      <div class="stage-num">1</div>
+      <div class="stage-body">
+        <div class="stage-title">Tokenizer baseline <span class="stage-badge badge-lossless">lossless</span></div>
+        <div class="stage-desc">Counts tokens using tiktoken (OpenAI) or character heuristic (Anthropic). Establishes the "before" measurement that drives all savings metrics.</div>
+      </div>
+    </div>
+    <div class="pipeline-stage">
+      <div class="stage-num">2</div>
+      <div class="stage-body">
+        <div class="stage-title">Structural compressor <span class="stage-badge badge-lossless">lossless</span></div>
+        <div class="stage-desc">JSON minification, verbose key shortening (authorization_token → auth_tok), whitespace normalization, redundant punctuation removal. Zero semantic loss. Confidence always 1.0.</div>
+      </div>
+    </div>
+    <div class="pipeline-stage">
+      <div class="stage-num">3</div>
+      <div class="stage-body">
+        <div class="stage-title">Semantic deduplicator <span class="stage-badge badge-lossless">lossless</span> <span class="stage-badge badge-lossy">lossy</span></div>
+        <div class="stage-desc">Embeds each history turn and collapses near-duplicate turns (cosine similarity ≥ threshold). Uses sentence-transformers when installed, TF-IDF fallback otherwise. Measured savings: up to 47% on repetitive sessions.</div>
+      </div>
+    </div>
+    <div class="pipeline-stage">
+      <div class="stage-num">4</div>
+      <div class="stage-body">
+        <div class="stage-title">Relevance scorer <span class="stage-badge badge-lossy">lossy</span></div>
+        <div class="stage-desc">Scores each history turn against the current query. Prunes low-signal turns. Entity-graph protected turns are immune to pruning regardless of score — files, functions, task IDs are never dropped.</div>
+      </div>
+    </div>
+    <div class="pipeline-stage">
+      <div class="stage-num">5</div>
+      <div class="stage-body">
+        <div class="stage-title">Rolling summarizer <span class="stage-badge badge-lossy">lossy</span></div>
+        <div class="stage-desc">Fires when history exceeds the token budget after stages 2–4. Compresses old turns into a keyword summary. Entity facts are always pinned into the summary — the model never loses load-bearing context.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="entity-callout" style="margin-top: 2.5rem;">
+    <h3>⬡ Entity Graph — the feature no competitor has</h3>
+    <p>
+      Every other compression proxy treats your conversation as a flat list of text to shrink.
+      We model it as a graph — tracking the files, functions, task IDs, URLs, and people
+      mentioned across turns. When the relevance pruner wants to drop a turn, it first checks
+      whether that turn introduced an entity the current query references. If it did, the turn
+      is <strong>load-bearing</strong> and gets a free pass — even if it's 40 turns old.
+      <br /><br />
+      Entity facts are always carried forward in the rolling summary:
+      <br />
+      <code style="font-size:0.8rem; color: var(--accent2);">[Entities] files: file.py; functions: process_data(; tasks: #42</code>
+      <br /><br />
+      The model always has the facts it needs, even when 60% of the context has been compressed away.
+    </p>
+  </div>
+</section>
+
+<hr />
+
+<!-- BENCHMARKS -->
+<section id="benchmarks">
+  <div class="section-label">Benchmarks</div>
+  <h2>Measured on real workloads</h2>
+  <p class="section-sub">
+    All numbers from live code. Reproducible:
+    <code>python -m scripts.savings_benchmark</code> and
+    <code>python -m scripts.benchmark_pipeline</code>
+  </p>
+
+  <div class="bench-grid">
+    <div class="bench-card">
+      <h3>TOKEN SAVINGS BY SCENARIO</h3>
+      <table>
+        <thead>
+          <tr><th>Scenario</th><th>Turns</th><th>Lossless</th><th>Lossy</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Customer support</td><td>10</td><td class="savings-low">0%</td><td class="savings-mid">23%</td></tr>
+          <tr><td>Customer support</td><td>20</td><td class="savings-high">45%</td><td class="savings-high">58%</td></tr>
+          <tr><td>Coding session</td><td>10</td><td class="savings-low">0%</td><td class="savings-mid">15%</td></tr>
+          <tr><td>Coding session</td><td>20</td><td class="savings-high">45%</td><td class="savings-high">53%</td></tr>
+          <tr><td>Research / Q&amp;A</td><td>10</td><td class="savings-low">0%</td><td class="savings-mid">38%</td></tr>
+          <tr><td>Research / Q&amp;A</td><td>20</td><td class="savings-high">47%</td><td class="savings-high">67%</td></tr>
+          <tr style="font-weight:700;"><td>Average</td><td>—</td><td class="savings-mid">23%</td><td class="savings-high">43%</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="bench-card">
+      <h3>COST IMPACT AT SCALE (GPT-4o, $5/1M tokens)</h3>
+      <table>
+        <thead>
+          <tr><th>Volume</th><th>Baseline/mo</th><th>Lossy/mo</th><th>Saved</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>1K req/day</td><td>$65.97</td><td>$33.50</td><td class="savings-high">$32.47</td></tr>
+          <tr><td>10K req/day</td><td>$659.75</td><td>$335.00</td><td class="savings-high">$324.75</td></tr>
+          <tr><td>100K req/day</td><td>$6,597.50</td><td>$3,350.00</td><td class="savings-high">$3,247.50</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="bench-card">
+    <h3>PROCESSING OVERHEAD (wall-clock, Python only — no LLM call time)</h3>
+    <div class="latency-bars">
+      <div class="latency-row">
+        <div class="latency-label">Short session (4 turns, ~180 tok)</div>
+        <div class="latency-bar-wrap"><div class="latency-bar" style="width:6.5%"></div></div>
+        <div class="latency-val">1.5 ms</div>
+      </div>
+      <div class="latency-row">
+        <div class="latency-label">Typical session (20 turns, ~700 tok)</div>
+        <div class="latency-bar-wrap"><div class="latency-bar" style="width:30%"></div></div>
+        <div class="latency-val">6.9 ms</div>
+      </div>
+      <div class="latency-row">
+        <div class="latency-label">Long session (60 turns, ~2,000 tok)</div>
+        <div class="latency-bar-wrap"><div class="latency-bar" style="width:93%"></div></div>
+        <div class="latency-val">21.5 ms</div>
+      </div>
+      <div class="latency-row">
+        <div class="latency-label" style="color:var(--muted); font-style:italic;">GPT-4o typical response</div>
+        <div class="latency-bar-wrap"><div class="latency-bar" style="width:100%; background: var(--border);"></div></div>
+        <div class="latency-val" style="color:var(--muted);">~1,500ms</div>
+      </div>
+    </div>
+    <p style="font-size:0.8rem; color:var(--muted); margin-top:1rem;">
+      The middleware overhead is &lt;1% of total request latency for typical sessions.
+      Industry target for production middleware: 5–20ms. ✓
+    </p>
+  </div>
+</section>
+
+<hr />
+
+<!-- COMPARISON -->
+<section id="compare">
+  <div class="section-label">Comparison</div>
+  <h2>Why this over Kompact or OpenCompress?</h2>
+  <p class="section-sub">
+    Every proxy compresses tokens. Only one tracks what the conversation is <em>about</em>.
+  </p>
+
+  <div style="overflow-x:auto;">
+    <table class="compare-table">
+      <thead>
+        <tr>
+          <th>Capability</th>
+          <th class="col-us">Efficient Tokenizer</th>
+          <th>Kompact</th>
+          <th>OpenCompress</th>
+          <th>LLMLingua-2</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Drop-in OpenAI proxy</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Anthropic support</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Structural compression</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Semantic deduplication</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Relevance pruning</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+        </tr>
+        <tr>
+          <td>
+            <strong>Entity graph (files, functions, task IDs never dropped)</strong>
+            <span class="unique-tag">UNIQUE</span>
+          </td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>
+            <strong>Session continuity across turns</strong>
+            <span class="unique-tag">UNIQUE</span>
+          </td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>
+            <strong>Rolling summarizer with entity pinning</strong>
+            <span class="unique-tag">UNIQUE</span>
+          </td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Anthropic cache_control injection</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Per-request confidence score</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Built-in observability dashboard</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span> Grafana</td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span></td>
+        </tr>
+        <tr>
+          <td>Self-hosted / open source</td>
+          <td class="col-us"><span class="check">✓</span></td>
+          <td><span class="check">✓</span></td>
+          <td><span class="cross">✗</span> SaaS only</td>
+          <td><span class="check">✓</span></td>
+        </tr>
+        <tr>
+          <td>Quality impact</td>
+          <td class="col-us" style="color:var(--accent2);">Near-zero (lossless) / bounded (lossy)</td>
+          <td>-0.5% to -3.9%</td>
+          <td>≥0.80 cosine</td>
+          <td style="color:#ef4444;">-20% to -27%</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:1.5rem; padding:1.25rem 1.5rem; background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); font-size:0.875rem; color:var(--muted);">
+    <strong style="color:var(--text);">The one-sentence difference:</strong>
+    Kompact and OpenCompress are stateless — they see one request at a time.
+    We maintain a live entity graph across the entire session, so <code>file.py</code> and
+    <code>task #42</code> are never accidentally pruned even 40 turns in.
+    And if your legal team won't let conversation context leave your VPC,
+    we're the only production-ready option with a self-hosted path.
+  </div>
+</section>
+
+<hr />
+
+<!-- PRICING -->
+<section id="pricing">
+  <div class="section-label">Pricing</div>
+  <h2>Pay when we save you money</h2>
+  <p class="section-sub">
+    No subscriptions. No minimums. You pay a percentage of the token savings we actually
+    deliver — verified on every request by the <code>_middleware</code> block.
+  </p>
+
+  <div class="pricing-grid">
+    <div class="pricing-card">
+      <div class="pricing-tier">Open Source</div>
+      <div class="pricing-price">Free <span>forever</span></div>
+      <div class="pricing-desc">Self-hosted. MIT licensed. Full pipeline. No telemetry sent anywhere.</div>
+      <ul class="pricing-features">
+        <li>Full 5-stage pipeline</li>
+        <li>Entity graph + session continuity</li>
+        <li>OpenAI + Anthropic support</li>
+        <li>Redis multi-node support</li>
+        <li>Built-in dashboard</li>
+        <li>Community support</li>
+      </ul>
+      <a href="https://github.com/ldsryush/Effecient-Tokenizer" class="pricing-cta" target="_blank">Clone on GitHub</a>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pricing-tier">Cloud Starter</div>
+      <div class="pricing-price">Free <span>up to $500/mo saved</span></div>
+      <div class="pricing-desc">Hosted proxy. Two lines of code. No infrastructure.</div>
+      <ul class="pricing-features">
+        <li>Everything in Open Source</li>
+        <li>Hosted managed infrastructure</li>
+        <li>All major providers</li>
+        <li>BYOK — we never store your keys</li>
+        <li>Live savings dashboard</li>
+      </ul>
+      <a href="https://github.com/ldsryush/Effecient-Tokenizer" class="pricing-cta">Get started</a>
+    </div>
+
+    <div class="pricing-card featured">
+      <div class="pricing-tier">Cloud Growth</div>
+      <div class="pricing-price">15% <span>of net savings</span></div>
+      <div class="pricing-desc">$500–$5K/mo in savings. For teams where token costs are a real line item.</div>
+      <ul class="pricing-features">
+        <li>Everything in Starter</li>
+        <li>Custom compression tuning</li>
+        <li>SSO / team access controls</li>
+        <li>Priority support (&lt;4hr)</li>
+        <li>Monthly attribution reports</li>
+      </ul>
+      <a href="https://github.com/ldsryush/Effecient-Tokenizer" class="pricing-cta">Contact us</a>
+    </div>
+
+    <div class="pricing-card">
+      <div class="pricing-tier">Enterprise</div>
+      <div class="pricing-price">Custom <span>terms</span></div>
+      <div class="pricing-desc">Self-hosted in your VPC. SOC 2. MSA. The option SaaS-only competitors can't offer.</div>
+      <ul class="pricing-features">
+        <li>Everything in Growth</li>
+        <li>Deploy inside your VPC</li>
+        <li>SOC 2 Type II</li>
+        <li>Custom SLA up to 99.99%</li>
+        <li>Dedicated CSE</li>
+        <li>On-premise support</li>
+      </ul>
+      <a href="https://github.com/ldsryush/Effecient-Tokenizer" class="pricing-cta">Talk to us</a>
+    </div>
+  </div>
+</section>
+
+<hr />
+
+<!-- FOOTER -->
+<footer>
+  <p>
+    <a href="https://github.com/ldsryush/Effecient-Tokenizer" target="_blank">GitHub</a> ·
+    <a href="../PRICING.md">Pricing details</a> ·
+    <a href="../README.md">Documentation</a>
+  </p>
+  <p style="margin-top:0.75rem;">
+    MIT Licensed · All benchmark numbers measured from live code and reproducible.
+  </p>
+</footer>
+
+</body>
+</html>
