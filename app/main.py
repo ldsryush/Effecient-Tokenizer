@@ -139,7 +139,7 @@ class ChatCompletionsRequest(BaseModel):
     messages: List[Dict[str, Any]]
     # Pipeline tuning (optional, ignored by upstream LLM)
     compression_mode: str = "lossy"           # "lossless" | "lossy"
-    max_history_tokens: int = 4_000
+    max_history_tokens: Optional[int] = None
     relevance_threshold: float = 0.15
     dedup_threshold: float = 0.92
     # Session for entity graph continuity
@@ -175,11 +175,18 @@ async def chat_completions(
             obs.log_context_loss(session_id, user_turn.turn_id, signal)
 
     # ── 2. Compression pipeline ────────────────────────────────────────────
+    if req.max_history_tokens is None:
+        ctx_window = split.model_info.get("ctx_window", 128_000)
+        derived_max = int(ctx_window * 0.6)
+        max_hist = max(512, derived_max)
+    else:
+        max_hist = req.max_history_tokens
+
     cfg = PipelineConfig(
         mode=req.compression_mode,
         dedup_threshold=req.dedup_threshold,
         relevance_threshold=req.relevance_threshold,
-        max_history_tokens=req.max_history_tokens,
+        max_history_tokens=max_hist,
     )
     result = run_pipeline(
         system_prompt=split.system_prompt,

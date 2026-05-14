@@ -90,6 +90,7 @@ def rolling_summarize(
     turns_to_compress: list[dict],
     existing_summary: str,
     graph: Optional[ConversationGraph] = None,
+    turn_ids: Optional[list[int]] = None,
     max_summary_len: int = 800,
 ) -> dict:
     """
@@ -143,11 +144,18 @@ def rolling_summarize(
     # Mark compressed turns in the graph
     if graph:
         compressed_count = 0
-        # We don't have turn_ids here directly; mark by content match
-        for turn in graph.turns:
-            if any(turn.content == m.get("content") for m in turns_to_compress):
-                turn.compressed = True
-                compressed_count += 1
+        if turn_ids:
+            turn_map = {t.turn_id: t for t in graph.turns}
+            for tid in turn_ids:
+                node = turn_map.get(tid)
+                if node and not node.compressed:
+                    node.compressed = True
+                    compressed_count += 1
+        else:
+            for turn in graph.turns:
+                if any(turn.content == m.get("content") for m in turns_to_compress):
+                    turn.compressed = True
+                    compressed_count += 1
     else:
         compressed_count = len(turns_to_compress)
 

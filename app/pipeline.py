@@ -219,12 +219,12 @@ def _prune_with_embeddings(
             removed_scores.append(score)
 
     pruned = [history[i] for i in keep_indices]
-    min_conf = min(removed_scores, default=1.0)
+    max_removed = max(removed_scores, default=0.0)
     return {
         "history":    pruned,
         "scores":     scores,
         "removed":    removed_indices,
-        "confidence": round(1.0 - (1.0 - min_conf), 4),
+        "confidence": round(1.0 - max_removed, 4),
         "stage":      "relevance",
     }
 
@@ -471,17 +471,25 @@ def _run_core(
     # ------------------------------------------------------------------
     hist_tokens_now = tokens_after_rel  # reuse — no extra encode call
     summary = graph.summary if graph else ""
+    history_turn_ids: list[int] = []
+    if graph:
+        if user_message:
+            history_turn_ids = [t.turn_id for t in graph.turns[-(len(history) + 1):-1]]
+        else:
+            history_turn_ids = [t.turn_id for t in graph.turns[-len(history):]]
 
     if hist_tokens_now > cfg.max_history_tokens:
         # Keep recent N turns verbatim; compress the rest
         keep_n = cfg.summarize_keep_recent
         to_compress = opt_history[:-keep_n] if keep_n > 0 else opt_history
         recent = opt_history[-keep_n:] if keep_n > 0 else []
+        to_compress_ids = history_turn_ids[:len(to_compress)] if history_turn_ids else None
 
         sum_result = rolling_summarize(
             turns_to_compress=to_compress,
             existing_summary=summary,
             graph=graph,
+            turn_ids=to_compress_ids,
             max_summary_len=cfg.max_summary_len,
         )
         summary = sum_result["summary"]
