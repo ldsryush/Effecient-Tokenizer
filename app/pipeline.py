@@ -25,6 +25,7 @@ Performance notes
 """
 from __future__ import annotations
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -39,8 +40,11 @@ from .deduplicator import (
 from .relevance import prune_history, score_turns
 from .summarizer import rolling_summarize
 from .entity_graph import ConversationGraph, extract_entities
+from .quality_gate import QualityGateResult, evaluate_quality_gate
+from . import observability as obs
 
 _DEBUG = os.environ.get("DEBUG_PIPELINE", "0") == "1"
+_QUALITY_GATE_THRESHOLD = float(os.environ.get("QUALITY_GATE_THRESHOLD", "0.15"))
 
 
 @dataclass
@@ -73,6 +77,8 @@ class PipelineResult:
 
     # Entity snapshot (always preserved)
     entity_snapshot: dict[str, list[str]] = field(default_factory=dict)
+    quality_gate: Optional[QualityGateResult] = None
+    compression_details: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +256,95 @@ def run(
         PipelineResult with optimised content + telemetry
     """
     cfg = config or PipelineConfig()
+    original_context = _context_text(system_prompt, history)
+
+    result = _run_core(
+        system_prompt=system_prompt,
+        history=history,
+        user_message=user_message,
+        model=model,
+        config=cfg,
+        graph=graph,
+    )
+
+    # Quality gate: only applies to lossy runs
+    if cfg.mode != "lossless":
+        compressed_context = _context_text(
+            result.system_prompt,
+            result.history,
+            result.summary,
+        )
+        qres = evaluate_quality_gate(original_context, compressed_context, _QUALITY_GATE_THRESHOLD)
+        result.quality_gate = qres
+
+        if not qres.passed:
+            obs.log_quality_gate({
+                "ts": time.time(),
+                "session_id": graph.session_id if graph else None,
+                "drift_score": qres.drift_score,
+                "threshold": _QUALITY_GATE_THRESHOLD,
+                "passed": qres.passed,
+                "fallback_used": qres.fallback_used,
+                "recommendation": qres.recommendation,
+                "mode_before": cfg.mode,
+                "mode_after": "lossless",
+            })
+
+            lossless_cfg = PipelineConfig(
+                mode="lossless",
+                dedup_threshold=cfg.dedup_threshold,
+                relevance_threshold=cfg.relevance_threshold,
+                max_history_tokens=cfg.max_history_tokens,
+                max_summary_len=cfg.max_summary_len,
+                summarize_keep_recent=cfg.summarize_keep_recent,
+            )
+            result = _run_core(
+                system_prompt=system_prompt,
+                history=history,
+                user_message=user_message,
+                model=model,
+                config=lossless_cfg,
+                graph=graph,
+            )
+            result.quality_gate = qres
+
+    return result
+
+
+def _context_text(system_prompt: str, history: list[dict], summary: str = "") -> str:
+    parts: list[str] = []
+    if system_prompt:
+        parts.append(f"[System]\n{system_prompt}")
+    if summary:
+        parts.append(f"[Summary]\n{summary}")
+    for msg in history:
+        role = msg.get("role", "user")
+        content = msg.get("content") or ""
+        parts.append(f"[{role}] {content}")
+    return "\n".join(p for p in parts if p).strip()
+
+
+def _entities_from_texts(texts: list[str]) -> list[str]:
+    names: set[str] = set()
+    for text in texts:
+        for ents in extract_entities(text).values():
+            for name in ents:
+                names.add(name)
+    return sorted(names)
+
+
+def _run_core(
+    system_prompt: str,
+    history: list[dict],
+    user_message: str,
+    model: str,
+    config: PipelineConfig,
+    graph: Optional[ConversationGraph],
+) -> PipelineResult:
+    cfg = config
     savings: dict[str, int] = {}
     confidences: list[float] = [1.0]
+    compression_details: list[dict] = []
 
     # ------------------------------------------------------------------
     # Stage 1 – Tokenizer-aware baseline count
@@ -308,6 +401,7 @@ def run(
     # Stage 3 – Semantic deduplication (uses shared embeddings)
     # ------------------------------------------------------------------
     tokens_before_dedup = count_tokens_messages(opt_history, model)
+    pre_dedup_history = opt_history
     dedup_result = _deduplicate_with_embeddings(
         opt_history,
         st_embs=shared_embs,
@@ -315,6 +409,15 @@ def run(
         mode=cfg.mode,
     )
     opt_history = dedup_result["history"]
+    if dedup_result["removed"]:
+        removed_texts = [pre_dedup_history[i]["content"] for i in dedup_result["removed"]]
+        compression_details.append({
+            "stage": "deduplication",
+            "removed_indices": dedup_result["removed"],
+            "confidence": dedup_result["confidence"],
+            "entities": _entities_from_texts(removed_texts),
+            "removed_texts": removed_texts,
+        })
 
     # After dedup some turns may have been removed; rebuild the embedding
     # slice that corresponds to the surviving turns so Stage 4 can reuse them.
@@ -339,6 +442,7 @@ def run(
         lb_ids = graph.load_bearing_turns(query_ents)
 
     tokens_before_rel = tokens_after_dedup  # already computed above — free reuse
+    pre_rel_history = opt_history
     rel_result = _prune_with_embeddings(
         opt_history,
         query=user_message,
@@ -349,6 +453,15 @@ def run(
         load_bearing_ids=lb_ids,
     )
     opt_history = rel_result["history"]
+    if rel_result["removed"]:
+        removed_texts = [pre_rel_history[i]["content"] for i in rel_result["removed"]]
+        compression_details.append({
+            "stage": "relevance",
+            "removed_indices": rel_result["removed"],
+            "confidence": rel_result["confidence"],
+            "entities": _entities_from_texts(removed_texts),
+            "removed_texts": removed_texts,
+        })
     tokens_after_rel = count_tokens_messages(opt_history, model)
     savings["relevance"] = max(0, tokens_before_rel - tokens_after_rel)
     confidences.append(rel_result["confidence"])
@@ -380,6 +493,16 @@ def run(
         tokens_after_sum = count_tokens_messages(opt_history, model)
         savings["summarization"] = max(0, tokens_before_sum - tokens_after_sum)
         confidences.append(sum_result["confidence"])
+        if to_compress:
+            removed_indices = list(range(0, len(to_compress)))
+            removed_texts = [m.get("content") or "" for m in to_compress]
+            compression_details.append({
+                "stage": "summarization",
+                "removed_indices": removed_indices,
+                "confidence": sum_result["confidence"],
+                "entities": _entities_from_texts(removed_texts),
+                "removed_texts": removed_texts,
+            })
     else:
         savings["summarization"] = 0
 
@@ -409,4 +532,5 @@ def run(
         confidence_score=overall_confidence,
         compression_mode=compression_mode,
         entity_snapshot=entity_snapshot,
+        compression_details=compression_details,
     )

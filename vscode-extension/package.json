@@ -20,6 +20,10 @@
         "title": "Efficient Tokenizer: Stop Proxy Server"
       },
       {
+        "command": "efficientTokenizer.openSidebar",
+        "title": "Efficient Tokenizer: Open Sidebar"
+      },
+      {
         "command": "efficientTokenizer.openDashboard",
         "title": "Efficient Tokenizer: Open Dashboard"
       },
@@ -69,6 +73,16 @@
           "type": "boolean",
           "default": false,
           "description": "Dry-run mode — run the compression pipeline but skip actual LLM calls."
+        },
+        "efficientTokenizer.relevanceThreshold": {
+          "type": "number",
+          "default": 0.15,
+          "description": "Relevance pruning threshold for lossy mode."
+        },
+        "efficientTokenizer.dedupThreshold": {
+          "type": "number",
+          "default": 0.92,
+          "description": "Deduplication cosine similarity threshold."
         },
         "efficientTokenizer.openaiApiKey": {
           "type": "string",
