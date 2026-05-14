@@ -59,6 +59,13 @@ _COREF_PATTERNS: list[tuple[Optional[str], re.Pattern]] = [
     (None,        re.compile(r"\b(it|this)\b", re.I)),
 ]
 
+_FALSE_FILE_PATTERNS: list[re.Pattern] = [
+    re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$"),           # IP address
+    re.compile(r"^\$?\d+(?:\.\d+)+$"),                # currency or numeric dotted
+    re.compile(r"^[A-Za-z](?:\.[A-Za-z])+\.?$"),        # U.S., U.K.
+    re.compile(r"^[vV]?\d+(?:\.\d+){1,3}$"),           # version-like
+]
+
 
 def _split_camel(token: str) -> list[str]:
     parts = re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", token)
@@ -98,6 +105,13 @@ def _canonicalize_entity(name: str, etype: str) -> str:
     return "_".join(tokens)
 
 
+def _is_false_file_entity(name: str) -> bool:
+    for pat in _FALSE_FILE_PATTERNS:
+        if pat.match(name):
+            return True
+    return False
+
+
 def extract_entities(text: str) -> dict[str, list[str]]:
     """Return {entity_type: [canonical_name, ...]} found in *text*."""
     found: dict[str, list[str]] = {}
@@ -110,6 +124,8 @@ def extract_entities(text: str) -> dict[str, list[str]]:
             seen: set[str] = set()
             unique: list[str] = []
             for raw in flat:
+                if etype == "file" and _is_false_file_entity(raw):
+                    continue
                 canon = _canonicalize_entity(raw, etype)
                 if canon and canon not in seen:
                     seen.add(canon)
@@ -201,7 +217,10 @@ class ConversationGraph:
         best_score = 0.0
 
         for ent in self.entities.values():
-            ent_tokens = set(_tokenize_entity_name(ent.name))
+            ent_candidates = [ent.name] + ent.aliases
+            ent_tokens: set[str] = set()
+            for cand in ent_candidates:
+                ent_tokens.update(_tokenize_entity_name(cand))
             if not ent_tokens:
                 continue
             overlap = len(tokens & ent_tokens) / max(1, max(len(tokens), len(ent_tokens)))

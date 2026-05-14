@@ -165,7 +165,7 @@ def aggregate_stats(limit: int = 1_000) -> dict:
 
     total = len(events)
     savings = [e["token_savings"] for e in events]
-    pcts    = [e["pct_saved"] for e in events]
+    raw_total = sum(e.get("raw_tokens", 0) for e in events)
     costs   = [e["cost_usd_saved"] for e in events]
     lats    = [e["overhead_ms"] for e in events]
     confs   = [e["confidence_score"] for e in events]
@@ -183,7 +183,7 @@ def aggregate_stats(limit: int = 1_000) -> dict:
         "events_total":         total,
         "total_token_savings":  sum(savings),
         "total_cost_usd_saved": round(sum(costs), 6),
-        "avg_pct_saved":        round(statistics.mean(pcts), 2) if pcts else 0.0,
+        "avg_pct_saved":        round(100.0 * sum(savings) / max(1, raw_total), 2),
         "avg_overhead_ms":      round(statistics.mean(lats), 3) if lats else 0.0,
         "avg_llm_latency_ms":   round(statistics.mean(llm_lats), 3) if llm_lats else 0.0,
         "avg_confidence":       round(statistics.mean(confs), 4) if confs else 1.0,

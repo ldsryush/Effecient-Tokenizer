@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Optional
 
 from .tokenizer import count_tokens, count_tokens_messages
@@ -45,6 +46,13 @@ from . import observability as obs
 
 _DEBUG = os.environ.get("DEBUG_PIPELINE", "0") == "1"
 _QUALITY_GATE_THRESHOLD = float(os.environ.get("QUALITY_GATE_THRESHOLD", "0.15"))
+_QUALITY_GATE_THRESHOLD_LOSSY = float(os.environ.get("QUALITY_GATE_THRESHOLD_LOSSY", str(_QUALITY_GATE_THRESHOLD)))
+_QUALITY_GATE_THRESHOLD_LOSSLESS = float(os.environ.get("QUALITY_GATE_THRESHOLD_LOSSLESS", str(_QUALITY_GATE_THRESHOLD)))
+
+
+@lru_cache(maxsize=256)
+def _compress_system_cached(text: str, mode: str) -> str:
+    return structural_compress(text, mode=mode)["text"]
 
 
 @dataclass
@@ -274,7 +282,8 @@ def run(
             result.history,
             result.summary,
         )
-        qres = evaluate_quality_gate(original_context, compressed_context, _QUALITY_GATE_THRESHOLD)
+        gate_threshold = _QUALITY_GATE_THRESHOLD_LOSSY if cfg.mode == "lossy" else _QUALITY_GATE_THRESHOLD_LOSSLESS
+        qres = evaluate_quality_gate(original_context, compressed_context, gate_threshold)
         result.quality_gate = qres
 
         if not qres.passed:
@@ -282,7 +291,7 @@ def run(
                 "ts": time.time(),
                 "session_id": graph.session_id if graph else None,
                 "drift_score": qres.drift_score,
-                "threshold": _QUALITY_GATE_THRESHOLD,
+                "threshold": gate_threshold,
                 "passed": qres.passed,
                 "fallback_used": qres.fallback_used,
                 "recommendation": qres.recommendation,
@@ -359,8 +368,7 @@ def _run_core(
     # ------------------------------------------------------------------
     # Stage 2 – Structural compression of system prompt + each turn
     # ------------------------------------------------------------------
-    sys_result = structural_compress(system_prompt, mode=cfg.mode)
-    opt_system = sys_result["text"]
+    opt_system = _compress_system_cached(system_prompt, cfg.mode)
 
     opt_history: list[dict] = []
     stage2_hist_saved = 0
@@ -522,6 +530,11 @@ def _run_core(
     # user_message is never modified by the pipeline, so add it to both
     # raw_tokens (Stage 1) and post_tokens so the comparison is symmetric.
     post_tokens = post_sys_tokens + post_hist_tokens + raw_user_tokens
+
+    total_savings = max(0, raw_tokens - post_tokens)
+    stage_sum = sum(savings.values())
+    if total_savings != stage_sum:
+        savings["adjustment"] = total_savings - stage_sum
 
     overall_confidence = min(confidences)
     compression_mode = "lossless" if cfg.mode == "lossless" else (

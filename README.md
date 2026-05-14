@@ -447,6 +447,10 @@ console.log(response.choices[0].message.content);
 console.log(response._middleware); // compression telemetry
 ```
 
+**Streaming note:** `stream=true` is currently emulated by buffering the full
+response and emitting a few SSE chunks so SDKs remain compatible. For the lowest
+latency on long responses, set `stream=false` when using heavy compression.
+
 ### With Claude / Anthropic (coming soon)
 
 The dispatcher already supports Anthropic — just pass `model: "claude-3-5-sonnet-20241022"`.

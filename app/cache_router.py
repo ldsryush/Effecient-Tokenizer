@@ -28,7 +28,7 @@ _STATIC_PREFIX_TTL = 3_600   # 1 hour — system prompts rarely change
 # ---------------------------------------------------------------------------
 
 def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def static_prefix_key(system_prompt: str, model: str) -> str:
