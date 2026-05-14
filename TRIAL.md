@@ -229,9 +229,3 @@ All numbers measured from live code. Reproducible with the included benchmark sc
 | **Average** | — | **23%** | **44%** |
 
 ---
-
-## Questions or issues?
-
-GitHub: https://github.com/ldsryush/Effecient-Tokenizer
-
-Open an issue or reach out directly. During the trial period, responses within 24 hours.
