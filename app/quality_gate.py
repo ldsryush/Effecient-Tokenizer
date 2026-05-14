@@ -18,6 +18,8 @@ class QualityGateResult:
     passed: bool
     fallback_used: bool
     recommendation: str  # proceed | use_lossless | abort_compression
+    entity_recall: float = 1.0
+    entity_loss: float = 0.0
 
 
 def _tokenize(text: str) -> set[str]:
@@ -77,11 +79,29 @@ def evaluate_quality_gate(
         fallback_used = True
         drift_score = _token_overlap_distance(original_context, compressed_context)
 
-    rec = _recommendation(drift_score, threshold)
-    passed = drift_score <= threshold
+    entity_recall = 1.0
+    entity_loss = 0.0
+    try:
+        from .entity_graph import extract_entities
+        orig_ents = extract_entities(original_context)
+        comp_ents = extract_entities(compressed_context)
+        orig_set = {n for names in orig_ents.values() for n in names}
+        comp_set = {n for names in comp_ents.values() for n in names}
+        if orig_set:
+            entity_recall = len(orig_set & comp_set) / max(1, len(orig_set))
+            entity_loss = 1.0 - entity_recall
+    except Exception:
+        entity_recall = 1.0
+        entity_loss = 0.0
+
+    combined_drift = max(drift_score, entity_loss)
+    rec = _recommendation(combined_drift, threshold)
+    passed = combined_drift <= threshold
     return QualityGateResult(
-        drift_score=round(float(drift_score), 4),
+        drift_score=round(float(combined_drift), 4),
         passed=passed,
         fallback_used=fallback_used,
         recommendation=rec,
+        entity_recall=round(float(entity_recall), 4),
+        entity_loss=round(float(entity_loss), 4),
     )

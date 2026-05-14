@@ -53,6 +53,7 @@ from .cache_router import route as cache_route, store_turn, invalidate_session
 from .dispatcher import dispatch
 from . import observability as obs
 from .entity_graph import get_graph, delete_graph, all_session_ids, load_or_create
+from .rag_compressor import compress_rag_chunks
 from .store import store
 
 
@@ -148,6 +149,13 @@ class ChatCompletionsRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
     stream: Optional[bool] = None
+
+
+class RagCompressRequest(BaseModel):
+    model: str = "gpt-4o"
+    query: str
+    chunks: List[str]
+    max_tokens: int = 4_000
 
 
 @app.post("/v1/chat/completions")
@@ -448,6 +456,23 @@ def admin_store_stats() -> Dict[str, Any]:
         "backend": type(store).__name__,
         "alive":   store.ping(),
         "size":    store.size(),
+    }
+
+
+@app.post("/rag/compress")
+def rag_compress(req: RagCompressRequest) -> Dict[str, Any]:
+    result = compress_rag_chunks(
+        chunks=req.chunks,
+        query=req.query,
+        model=req.model,
+        max_tokens=req.max_tokens,
+    )
+    return {
+        "model": req.model,
+        "tokens_before": result.tokens_before,
+        "tokens_after": result.tokens_after,
+        "chunks": result.chunks,
+        "scores": result.scores,
     }
 
 
