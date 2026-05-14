@@ -19,7 +19,9 @@ from __future__ import annotations
 import time
 import statistics
 import threading
+import re
 from collections import deque
+from dataclasses import dataclass
 from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
@@ -32,6 +34,9 @@ _LOCK = threading.Lock()
 TELEMETRY_BUS: deque[dict] = deque(maxlen=1_000)
 CONFIDENCE_LOG: deque[dict] = deque(maxlen=1_000)
 ATTRIBUTION_LOG: deque[dict] = deque(maxlen=500)
+QUALITY_GATE_LOG: deque[dict] = deque(maxlen=500)
+CONTEXT_LOSS_LOG: deque[dict] = deque(maxlen=500)
+_LAST_COMPRESSION_BY_SESSION: dict[str, dict] = {}
 
 # Pricing table (USD per 1M tokens, input side — as quoted by providers)
 # e.g. GPT-4o = $5.00 per 1 million input tokens
@@ -125,6 +130,7 @@ def _write_confidence_log(event: dict, savings_by_stage: dict[str, int]) -> None
         "stages_applied":   list(savings_by_stage.keys()),
         "savings_by_stage": savings_by_stage,
         "tokens_dropped":   event["token_savings"],
+        "compression_details": event.get("compression_details", []),
     }
     with _LOCK:
         CONFIDENCE_LOG.append(entry)
@@ -213,3 +219,88 @@ def recent_confidence_log(limit: int = 50) -> list[dict]:
 def recent_attribution(limit: int = 50) -> list[dict]:
     with _LOCK:
         return list(ATTRIBUTION_LOG)[-limit:]
+
+
+def log_quality_gate(entry: dict) -> None:
+    with _LOCK:
+        QUALITY_GATE_LOG.append(entry)
+
+
+def recent_quality_gate_log(limit: int = 50) -> list[dict]:
+    with _LOCK:
+        return list(QUALITY_GATE_LOG)[-limit:]
+
+
+@dataclass
+class ContextLossSignal:
+    detected: bool
+    phrase: str = ""
+    confidence: float = 0.0
+
+
+_CONTEXT_LOSS_PATTERNS: list[tuple[re.Pattern, float]] = [
+    (re.compile(r"\b(i already told you|as i mentioned|you forgot|remember when i said)\b", re.I), 0.95),
+    (re.compile(r"\b(as i said|like i said|i told you earlier|you didn't remember)\b", re.I), 0.8),
+    (re.compile(r"\b(you missed that|you lost track|you keep forgetting)\b", re.I), 0.7),
+]
+
+
+def detect_context_loss(user_message: str) -> ContextLossSignal:
+    for pat, conf in _CONTEXT_LOSS_PATTERNS:
+        m = pat.search(user_message or "")
+        if m:
+            return ContextLossSignal(detected=True, phrase=m.group(0), confidence=conf)
+    return ContextLossSignal(detected=False)
+
+
+def update_last_compression(
+    session_id: str,
+    compression_details: list[dict],
+    entity_snapshot: dict[str, list[str]],
+    confidence_score: float,
+) -> None:
+    if not session_id:
+        return
+    with _LOCK:
+        _LAST_COMPRESSION_BY_SESSION[session_id] = {
+            "compression_details": compression_details,
+            "entity_snapshot": entity_snapshot,
+            "confidence_score": confidence_score,
+        }
+
+
+def log_context_loss(session_id: str, turn_index: int, signal: ContextLossSignal) -> None:
+    if not signal.detected:
+        return
+    with _LOCK:
+        prior = _LAST_COMPRESSION_BY_SESSION.get(session_id, {})
+        details = prior.get("compression_details", [])
+        entities = set()
+        stages = []
+        stage_conf = {}
+        removed_turns = []
+        for d in details:
+            stages.append(d.get("stage"))
+            stage_conf[d.get("stage")] = d.get("confidence")
+            removed_turns.append({
+                "stage": d.get("stage"),
+                "removed_indices": d.get("removed_indices", []),
+            })
+            for ent in d.get("entities", []):
+                entities.add(ent)
+
+        CONTEXT_LOSS_LOG.append({
+            "ts": time.time(),
+            "session_id": session_id,
+            "turn_index": turn_index,
+            "signal_phrase": signal.phrase,
+            "signal_confidence": signal.confidence,
+            "compressed_turns": removed_turns,
+            "compression_confidence": stage_conf,
+            "entities_involved": sorted(entities),
+        })
+
+
+def recent_context_loss_log(limit: int = 50) -> list[dict]:
+    with _LOCK:
+        return list(CONTEXT_LOSS_LOG)[-limit:]

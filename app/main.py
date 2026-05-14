@@ -52,7 +52,7 @@ from .pipeline import run as run_pipeline, PipelineConfig
 from .cache_router import route as cache_route, store_turn, invalidate_session
 from .dispatcher import dispatch
 from . import observability as obs
-from .entity_graph import get_graph, delete_graph, all_session_ids
+from .entity_graph import get_graph, delete_graph, all_session_ids, load_or_create
 from .store import store
 
 
@@ -163,13 +163,16 @@ async def chat_completions(
     # ── 1. Ingress: split payload ──────────────────────────────────────────
     split = split_messages(req.messages, req.model)
     session_id = req.session_id or f"anon_{uuid.uuid4().hex[:8]}"
-    graph = get_graph(session_id)
+    graph = load_or_create(session_id, "anonymous", store)
 
     # Register all history turns in the entity graph
     for msg in split.history:
         graph.add_turn(msg["role"], msg["content"])
     if split.user_message:
-        graph.add_turn("user", split.user_message)
+        signal = obs.detect_context_loss(split.user_message)
+        user_turn = graph.add_turn("user", split.user_message)
+        if signal.detected:
+            obs.log_context_loss(session_id, user_turn.turn_id, signal)
 
     # ── 2. Compression pipeline ────────────────────────────────────────────
     cfg = PipelineConfig(
@@ -185,6 +188,12 @@ async def chat_completions(
         model=req.model,
         config=cfg,
         graph=graph,
+    )
+    obs.update_last_compression(
+        session_id=session_id,
+        compression_details=result.compression_details,
+        entity_snapshot=result.entity_snapshot,
+        confidence_score=result.confidence_score,
     )
 
     # ── 3. Cache router ────────────────────────────────────────────────────
@@ -209,7 +218,10 @@ async def chat_completions(
             confidence_score=result.confidence_score,
             overhead_ms=overhead_ms,
             session_id=session_id,
-            extra={"cache_hit": True},
+            extra={
+                "cache_hit": True,
+                "compression_details": result.compression_details,
+            },
         )
         return cache_result.cached_response
 
@@ -276,6 +288,7 @@ async def chat_completions(
             "cache_hit":      cache_result.full_cache_hit,
             "fallback_used":  llm_response.get("fallback_used", False),
             "llm_latency_ms": round(llm_latency_ms, 3),
+            "compression_details": result.compression_details,
         },
     )
 
@@ -398,6 +411,11 @@ def admin_confidence_log(limit: int = 50) -> Dict[str, Any]:
     return {"confidence_log": obs.recent_confidence_log(limit=limit)}
 
 
+@app.get("/admin/context-loss-log")
+def admin_context_loss_log(limit: int = 50) -> Dict[str, Any]:
+    return {"context_loss_log": obs.recent_context_loss_log(limit=limit)}
+
+
 @app.get("/admin/events")
 def admin_events(limit: int = 50) -> Dict[str, Any]:
     return {"events": obs.recent_events(limit=limit)}
@@ -411,7 +429,7 @@ def admin_sessions() -> Dict[str, Any]:
 
 @app.delete("/admin/sessions/{session_id}")
 def admin_delete_session(session_id: str) -> Dict[str, Any]:
-    delete_graph(session_id)
+    delete_graph(session_id, "anonymous", store)
     invalidate_session(session_id)
     SESSIONS.pop(session_id, None)
     return {"deleted": session_id}
@@ -643,7 +661,7 @@ def chat(req: ChatRequest) -> Dict[str, Any]:
 @app.post("/chat/reset")
 def chat_reset(req: ResetRequest) -> Dict[str, Any]:
     SESSIONS.pop(req.session_id, None)
-    delete_graph(req.session_id)
+    delete_graph(req.session_id, "anonymous", store)
     invalidate_session(req.session_id)
     return {"reset": True, "session_id": req.session_id}
 
